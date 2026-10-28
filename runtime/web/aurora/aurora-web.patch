@@ -1,0 +1,631 @@
+diff --git a/cmake/AuroraDawnProvider.cmake b/cmake/AuroraDawnProvider.cmake
+index 3a57584..5bf10bd 100644
+--- a/cmake/AuroraDawnProvider.cmake
++++ b/cmake/AuroraDawnProvider.cmake
+@@ -9,6 +9,20 @@ include("${CMAKE_CURRENT_LIST_DIR}/AuroraTargetPlatform.cmake")
+ #   - DAWN_ENABLE_* backend variables are set for the target platform
+ #   - AURORA_DAWN_IS_SHARED is set to TRUE/FALSE
+ 
++# Web (Emscripten): the browser implements WebGPU. Emscripten's bundled emdawnwebgpu port
++# provides the same webgpu.h / webgpu_cpp.h API on top of it, so stand it in for Dawn.
++if (EMSCRIPTEN)
++  if (NOT TARGET dawn::webgpu_dawn)
++    add_library(aurora_emdawnwebgpu INTERFACE)
++    target_compile_options(aurora_emdawnwebgpu INTERFACE --use-port=emdawnwebgpu)
++    target_link_options(aurora_emdawnwebgpu INTERFACE --use-port=emdawnwebgpu)
++    add_library(dawn::webgpu_dawn ALIAS aurora_emdawnwebgpu)
++    add_library(dawn::dawncpp_headers ALIAS aurora_emdawnwebgpu)
++  endif ()
++  set(AURORA_DAWN_IS_SHARED FALSE)
++  return()
++endif ()
++
+ # When using a non-vendored Dawn, we don't get DAWN_ENABLE_* from its build.
+ # Infer from the target platform instead.
+ function(_aurora_dawn_set_platform_backends)
+diff --git a/cmake/AuroraDearImguiProvider.cmake b/cmake/AuroraDearImguiProvider.cmake
+index 994196d..358abcc 100644
+--- a/cmake/AuroraDearImguiProvider.cmake
++++ b/cmake/AuroraDearImguiProvider.cmake
+@@ -27,6 +27,12 @@ if (NOT TARGET imgui)
+                 ${imgui_SOURCE_DIR}/backends/imgui_impl_wgpu.cpp
+         )
+         target_compile_definitions(imgui_backends PRIVATE IMGUI_IMPL_WEBGPU_BACKEND_DAWN)
++        if (EMSCRIPTEN)
++            # Its Emscripten branch targets the retired -sUSE_WEBGPU bindings; emdawnwebgpu exposes
++            # Dawn's API, which is exactly the Dawn branch.
++            set_source_files_properties(${imgui_SOURCE_DIR}/backends/imgui_impl_wgpu.cpp
++                    PROPERTIES COMPILE_OPTIONS "-U__EMSCRIPTEN__")
++        endif ()
+         target_link_libraries(imgui_backends PRIVATE imgui ${AURORA_SDL3_TARGET} dawn::webgpu_dawn)
+         target_link_libraries(imgui PUBLIC imgui_backends imgui_headers)
+ 
+diff --git a/cmake/aurora_core.cmake b/cmake/aurora_core.cmake
+index 0a5178a..9155c28 100644
+--- a/cmake/aurora_core.cmake
++++ b/cmake/aurora_core.cmake
+@@ -62,7 +62,12 @@ endif ()
+ if (AURORA_ENABLE_GX)
+     target_sources(aurora_core PRIVATE lib/imgui.cpp)
+     target_link_libraries(aurora_core PUBLIC imgui)
+-    target_link_libraries(aurora_core PRIVATE sqlite3)
++    if (NOT EMSCRIPTEN)
++        # The persistent pipeline cache (lib/gfx/pipeline_cache.cpp). The web build has none:
++        # browsers keep their own shader caches.
++        target_link_libraries(aurora_core PRIVATE sqlite3)
++        target_compile_definitions(aurora_core PUBLIC AURORA_PIPELINE_CACHE_DB)
++    endif ()
+ endif ()
+ 
+ if (AURORA_ENABLE_RMLUI)
+@@ -83,7 +88,18 @@ if (AURORA_ENABLE_RMLUI)
+     target_link_libraries(aurora_core PUBLIC rmlui_backends)
+ endif ()
+ 
+-if (AURORA_ENABLE_GX)
++if (AURORA_ENABLE_GX AND EMSCRIPTEN)
++    # The browser's WebGPU through emdawnwebgpu: none of Dawn's native-only pieces (its blob cache,
++    # backend bindings or Tracy platform hooks) exist there.
++    target_compile_definitions(aurora_core PUBLIC AURORA_ENABLE_GX)
++    target_compile_definitions(aurora_core PRIVATE ENABLE_BACKEND_WEBGPU)
++    target_sources(aurora_core PRIVATE
++            lib/webgpu/gpu.cpp
++            lib/webgpu/gpu_prof.cpp
++            lib/webgpu/web_extensions.cpp
++            lib/gfx/presentation.cpp
++    )
++elseif (AURORA_ENABLE_GX)
+     target_compile_definitions(aurora_core PUBLIC AURORA_ENABLE_GX WEBGPU_DAWN)
+     target_sources(aurora_core PRIVATE
+             lib/webgpu/gpu.cpp
+@@ -93,6 +109,8 @@ if (AURORA_ENABLE_GX)
+             lib/dawn/BackendBinding.cpp
+             lib/dawn/TracyPlatform.cpp
+     )
++endif ()
++if (AURORA_ENABLE_GX)
+     if (CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "GNU")
+         set_source_files_properties(lib/dawn/TracyPlatform.cpp PROPERTIES COMPILE_FLAGS -fno-rtti)
+     endif ()
+diff --git a/cmake/aurora_gx.cmake b/cmake/aurora_gx.cmake
+index 8e58167..6a9463a 100644
+--- a/cmake/aurora_gx.cmake
++++ b/cmake/aurora_gx.cmake
+@@ -63,7 +63,11 @@ add_library(aurora::gx ALIAS aurora_gx)
+ set_target_properties(aurora_gx PROPERTIES FOLDER "aurora")
+ 
+ target_link_libraries(aurora_gx PUBLIC aurora::core dawn::webgpu_dawn xxHash::xxhash)
+-target_link_libraries(aurora_gx PRIVATE absl::btree absl::flat_hash_map sqlite3 Tracy::TracyClient PNG::PNG)
++target_link_libraries(aurora_gx PRIVATE absl::btree absl::flat_hash_map Tracy::TracyClient PNG::PNG)
++if (TARGET sqlite3)
++  # The persistent pipeline cache; absent on the web (see aurora_core.cmake).
++  target_link_libraries(aurora_gx PRIVATE sqlite3)
++endif ()
+ target_compile_definitions(aurora_gx PRIVATE WEBGPU_DAWN)
+ 
+ if (AURORA_ENABLE_RMLUI)
+diff --git a/extern/CMakeLists.txt b/extern/CMakeLists.txt
+index 3a75c33..8c67fb5 100644
+--- a/extern/CMakeLists.txt
++++ b/extern/CMakeLists.txt
+@@ -266,7 +266,11 @@ if (AURORA_ENABLE_GX)
+       endif ()
+     endif ()
+   endif ()
+-  if (NOT TARGET Freetype::Freetype)
++  if (EMSCRIPTEN)
++    # Optional for imgui, which rasterizes with its bundled stb_truetype without it. The web build
++    # skips it to keep the module small.
++    message(STATUS "aurora: Freetype disabled on the web")
++  elseif (NOT TARGET Freetype::Freetype)
+     message(STATUS "aurora: Fetching Freetype")
+     set(FT_DISABLE_BROTLI ON CACHE BOOL "" FORCE)
+     set(FT_DISABLE_HARFBUZZ ON CACHE BOOL "" FORCE)
+@@ -286,6 +290,9 @@ if (AURORA_ENABLE_GX)
+   set(AURORA_IMGUI_IMPLEMENTATION ON)
+   include(../cmake/AuroraDearImguiProvider.cmake)
+ 
++  if (EMSCRIPTEN)
++    message(STATUS "aurora: sqlite3 not needed on the web (no persistent pipeline cache)")
++  else ()
+   aurora_find_package_global(SQLite3)
+   if (TARGET SQLite3::SQLite3)
+     message(STATUS "aurora: Using existing sqlite3")
+@@ -316,6 +323,7 @@ if (AURORA_ENABLE_GX)
+     add_library(sqlite3 STATIC ${sqlite3_SOURCE_DIR}/sqlite3.c)
+     target_include_directories(sqlite3 PUBLIC ${sqlite3_SOURCE_DIR})
+   endif ()
++  endif ()
+ 
+   if (AURORA_CACHE_USE_ZSTD)
+     aurora_find_package_global(zstd CONFIG QUIET)
+diff --git a/lib/aurora.cpp b/lib/aurora.cpp
+index d08aa8d..40717b1 100644
+--- a/lib/aurora.cpp
++++ b/lib/aurora.cpp
+@@ -20,6 +20,7 @@
+ #include "imgui.hpp"
+ #include "webgpu/gpu.hpp"
+ #include "webgpu/gpu_prof.hpp"
++#include "webgpu/web_extensions.hpp"
+ #include "webgpu/metalfx.hpp"
+ #include <webgpu/webgpu_cpp.h>
+ #endif
+@@ -677,7 +678,11 @@ void end_frame_gx(imgui::DrawData imguiDrawData) noexcept {
+ 
+           if (window::is_presentable()) {
+             const uint64_t presentStart = gfx::presentation::now_nanos();
++#ifdef __EMSCRIPTEN__
++            status = webgpu::web::present(g_surface);
++#else
+             status = g_surface.Present();
++#endif
+             surfaceWaitNanos += gfx::presentation::now_nanos() - presentStart;
+           }
+         }
+diff --git a/lib/gfx/frame.cpp b/lib/gfx/frame.cpp
+index 0014f08..f7cb889 100644
+--- a/lib/gfx/frame.cpp
++++ b/lib/gfx/frame.cpp
+@@ -10,6 +10,7 @@
+ #include "recording.hpp"
+ #include "render_worker.hpp"
+ #include "resource_cache.hpp"
++#include "../webgpu/web_extensions.hpp"
+ #include "tex_copy_conv.hpp"
+ #include "tex_palette_conv.hpp"
+ #include "texture_replacement.hpp"
+@@ -217,10 +218,16 @@ void wait_for_gpu_progress(std::chrono::nanoseconds sleepDuration) {
+     enqueue_process_events();
+   }
+ 
++#ifdef __EMSCRIPTEN__
++  // The completions this waits for are delivered from the browser's event loop.
++  (void)sleepDuration;
++  webgpu::web::yield_to_browser();
++#else
+   {
+     std::unique_lock lock{g_progressMutex};
+     thread::wait_for(g_progressChanged, lock, sleepDuration, [&] { return generation != g_progressGeneration; });
+   }
++#endif
+   render_worker::service_producer_wait();
+ }
+ 
+diff --git a/lib/gfx/pipeline_cache.cpp b/lib/gfx/pipeline_cache.cpp
+index e349eed..641b419 100644
+--- a/lib/gfx/pipeline_cache.cpp
++++ b/lib/gfx/pipeline_cache.cpp
+@@ -10,7 +10,9 @@
+ #ifdef AURORA_ENABLE_RMLUI
+ #include "../rmlui/pipeline.hpp"
+ #endif
++#ifdef AURORA_PIPELINE_CACHE_DB
+ #include "../sqlite_utils.hpp"
++#endif
+ #include "../webgpu/gpu.hpp"
+ 
+ #include <algorithm>
+@@ -75,10 +77,12 @@ struct KnownPipeline {
+   uint32_t persistedFrame = UINT32_MAX;
+ };
+ 
++#ifdef AURORA_PIPELINE_CACHE_DB
+ struct SdlVfsSqliteFile {
+   sqlite3_file base;
+   SDL_IOStream* io = nullptr;
+ };
++#endif
+ 
+ static std::mutex g_pipelineMutex;
+ static bool g_hasPipelineThread = false;
+@@ -102,17 +106,27 @@ static std::deque<PendingPipeline> g_backgroundPipelineQueue;
+ static absl::flat_hash_set<PipelineRef> g_pendingPipelines;
+ static std::atomic_bool g_gpuCachePrunePending = false;
+ 
++// Without AURORA_PIPELINE_CACHE_DB (the web build: browsers keep their own shader caches) there is
++// no persistent cache: the database never opens, which the code below already treats as "nothing
++// loaded, nothing to write".
++#ifdef AURORA_PIPELINE_CACHE_DB
+ static sqlite3* g_pipelineCacheDb = nullptr;
+ static sqlite3_stmt* g_pipelineCacheLoadStmt = nullptr;
+ static sqlite3_stmt* g_pipelineCacheUpsertStmt = nullptr;
++#else
++static void* g_pipelineCacheDb = nullptr;
++#endif
+ static bool g_pipelineCacheBroken = false;
+ static std::thread g_pipelineCacheWriterThread;
+ static std::condition_variable g_pipelineCacheWriterCv;
+ static std::mutex g_pipelineCacheWriterMutex;
+ static std::deque<PipelineCacheWrite> g_pipelineCacheWriteQueue;
+ static bool g_pipelineCacheWriterStop = false;
++#ifdef AURORA_PIPELINE_CACHE_DB
+ static int g_sdlVfsRegisterResult = SQLITE_ERROR;
++#endif
+ 
++#ifdef AURORA_PIPELINE_CACHE_DB
+ static SdlVfsSqliteFile* sdl_vfs_file(sqlite3_file* file) { return reinterpret_cast<SdlVfsSqliteFile*>(file); }
+ 
+ static sqlite3_vfs* default_vfs(sqlite3_vfs* vfs) { return static_cast<sqlite3_vfs*>(vfs->pAppData); }
+@@ -339,6 +353,7 @@ static bool register_sdl_vfs() {
+   });
+   return g_sdlVfsRegisterResult == SQLITE_OK;
+ }
++#endif
+ 
+ #if defined(__cpp_lib_atomic_ref)
+ static std::atomic_ref queuedPipelines{detail::resources().stats.queuedPipelines};
+@@ -595,6 +610,7 @@ static PipelineRef resolve_pipeline(ShaderType type, const rmlui::PipelineConfig
+ }
+ #endif
+ 
++#ifdef AURORA_PIPELINE_CACHE_DB
+ static void pipeline_cache_abort() {
+   g_pipelineCacheBroken = true;
+   if (g_pipelineCacheLoadStmt != nullptr) {
+@@ -1002,6 +1018,11 @@ static void pipeline_cache_writer() {
+     }
+   }
+ }
++#else
++static void pipeline_cache_abort() { g_pipelineCacheBroken = true; }
++static bool prepare_pipeline_cache_db() { return false; }
++static void pipeline_cache_writer() {}
++#endif
+ 
+ static void pipeline_worker() {
+ #ifdef TRACY_ENABLE
+@@ -1041,6 +1062,7 @@ static void pipeline_worker() {
+   }
+ }
+ 
++#ifdef AURORA_PIPELINE_CACHE_DB
+ template <typename PipelineConfig>
+ static size_t load_pipeline_cache_entries(ShaderType type, uint32_t configVersion) {
+   if (!prepare_pipeline_cache_db()) {
+@@ -1107,6 +1129,9 @@ static size_t load_pipeline_cache() {
+   acceptedRows += load_pipeline_cache_entries<gx::PipelineConfig>(ShaderType::GX, gx::GXPipelineConfigVersion);
+   return acceptedRows;
+ }
++#else
++static size_t load_pipeline_cache() { return 0; }
++#endif
+ 
+ static void start_pipeline_cache_writer() {
+   if (!prepare_pipeline_cache_db()) {
+diff --git a/lib/gfx/render_worker.cpp b/lib/gfx/render_worker.cpp
+index 0cdb411..9f33758 100644
+--- a/lib/gfx/render_worker.cpp
++++ b/lib/gfx/render_worker.cpp
+@@ -192,6 +192,11 @@ size_t FrameSlotPool::free_count() const {
+ }
+ 
+ void initialize() {
++#ifdef __EMSCRIPTEN__
++  // WebGPU objects belong to the one JS thread that created them, so on the web the render work
++  // runs inline on the caller (enqueue() does that whenever the worker is not running).
++  return;
++#endif
+   if (g_running.exchange(true, std::memory_order_acq_rel)) {
+     return;
+   }
+@@ -282,7 +287,13 @@ bool synchronize_for(std::chrono::microseconds timeout) {
+   return thread::wait_for(sync->cv, lock, timeout, [&] { return sync->complete; });
+ }
+ 
+-bool is_worker_thread() noexcept { return g_workerThreadId == std::this_thread::get_id(); }
++bool is_worker_thread() noexcept {
++#ifdef __EMSCRIPTEN__
++  return true; // all render work runs inline on the single WebGPU thread (see initialize())
++#else
++  return g_workerThreadId == std::this_thread::get_id();
++#endif
++}
+ 
+ bool is_idle() noexcept { return g_pendingItems.load(std::memory_order_acquire) == 0; }
+ 
+diff --git a/lib/gfx/texture_replacement.cpp b/lib/gfx/texture_replacement.cpp
+index 1a86888..7d01250 100644
+--- a/lib/gfx/texture_replacement.cpp
++++ b/lib/gfx/texture_replacement.cpp
+@@ -462,7 +462,8 @@ bool remove_mipmaps(gfx::ConvertedTexture& texture) noexcept {
+     return false;
+   }
+ 
+-  ByteBuffer data{size};
++  // Bounded by texture.data.size() above, so exact on 32-bit hosts too.
++  ByteBuffer data{static_cast<size_t>(size)};
+   std::memcpy(data.data(), texture.data.data(), size);
+   texture.mips = 1;
+   texture.data = std::move(data);
+@@ -681,11 +682,12 @@ std::optional<gfx::ConvertedTexture> load_encoded_replacement(Source&& src) noex
+ 
+   const uint32_t mips = 1u + static_cast<uint32_t>(more.size());
+   const uint64_t n = gfx::calc_texture_size(base->format, base->width, base->height, mips);
+-  if (n == 0) {
++  // The appends below are bounded by n, so it must fit the buffer exactly (32-bit hosts).
++  if (n == 0 || static_cast<uint64_t>(static_cast<size_t>(n)) != n) {
+     return std::nullopt;
+   }
+ 
+-  ByteBuffer blob{n};
++  ByteBuffer blob{static_cast<size_t>(n)};
+   uint8_t* const dst = blob.data();
+   uint64_t o = 0;
+   const auto append = [&](const ByteBuffer& d) noexcept -> bool {
+diff --git a/lib/gx/gx.cpp b/lib/gx/gx.cpp
+index e373bf0..c5376a5 100644
+--- a/lib/gx/gx.cpp
++++ b/lib/gx/gx.cpp
+@@ -4,6 +4,7 @@
+ #include "texture.hpp"
+ #include "../dolphin/vi/vi_internal.hpp"
+ #include "../webgpu/gpu.hpp"
++#include "../webgpu/web_extensions.hpp"
+ #include "../internal.hpp"
+ #include "../window.hpp"
+ #include "../gfx/resources.hpp"
+@@ -778,7 +779,11 @@ void initialize() noexcept {
+         .bindGroupLayouts = layouts.data(),
+         .immediateSize = sizeof(DrawImmediateData),
+     };
++#ifdef __EMSCRIPTEN__
++    sPipelineLayout = webgpu::web::create_pipeline_layout(g_device, desc);
++#else
+     sPipelineLayout = g_device.CreatePipelineLayout(&desc);
++#endif
+   }
+ }
+ 
+diff --git a/lib/gx/pipeline.cpp b/lib/gx/pipeline.cpp
+index 1217385..e1c2b5f 100644
+--- a/lib/gx/pipeline.cpp
++++ b/lib/gx/pipeline.cpp
+@@ -6,6 +6,7 @@
+ #include "../gfx/resources.hpp"
+ #include "../gfx/pipeline_cache.hpp"
+ #include "../gfx/resource_cache.hpp"
++#include "../webgpu/web_extensions.hpp"
+ 
+ #include "gx_fmt.hpp"
+ #include "shader_info.hpp"
+@@ -65,7 +66,11 @@ void render(const DrawData& data, const wgpu::RenderPassEncoder& pass) {
+     return;
+   }
+   const auto& resources = gfx::detail::resources();
++#ifdef __EMSCRIPTEN__
++  webgpu::web::set_immediates(pass, 0, &data.immediateData, sizeof(data.immediateData));
++#else
+   pass.SetImmediates(0, &data.immediateData, sizeof(data.immediateData));
++#endif
+   uint32_t uniformOffset = data.uniformRange.offset;
+   if (const int slot = g_interpolationEncodeSlot; slot >= 0 && data.interpUniformBase != UINT32_MAX) {
+     uniformOffset = data.interpUniformBase + static_cast<uint32_t>(slot) * gfx::align_uniform(data.uniformRange.size);
+diff --git a/lib/webgpu/gpu.cpp b/lib/webgpu/gpu.cpp
+index 6f4caab..d016cf6 100644
+--- a/lib/webgpu/gpu.cpp
++++ b/lib/webgpu/gpu.cpp
+@@ -1,4 +1,5 @@
+ #include "gpu.hpp"
++#include "web_extensions.hpp"
+ 
+ #include <algorithm>
+ #include <atomic>
+@@ -72,6 +73,7 @@ static std::atomic_bool g_vsyncEnabled = true;
+ 
+ namespace {
+ 
++#ifdef WEBGPU_DAWN
+ AuroraLogLevel wgpu_log_level(wgpu::LoggingType type) {
+   switch (type) {
+   case wgpu::LoggingType::Verbose:
+@@ -90,6 +92,7 @@ AuroraLogLevel wgpu_log_level(wgpu::LoggingType type) {
+ void wgpu_log(wgpu::LoggingType type, wgpu::StringView message) {
+   Log.report(wgpu_log_level(type), "WebGPU message: {}", message);
+ }
++#endif
+ 
+ struct ResampleUniformBlock {
+   uint32_t samplerMode = 0;
+@@ -205,6 +208,9 @@ wgpu::TextureFormat best_surface_format() {
+   if (g_surfaceCapabilities.formatCount == 0) {
+     return wgpu::TextureFormat::Undefined;
+   }
++#ifdef __EMSCRIPTEN__
++  return web::preferred_canvas_format();
++#endif
+   for (size_t i = 0; i < g_surfaceCapabilities.formatCount; ++i) {
+     const auto format = to_linear(g_surfaceCapabilities.formats[i]);
+     if (format == wgpu::TextureFormat::RGBA8Unorm || format == wgpu::TextureFormat::BGRA8Unorm) {
+@@ -790,7 +796,9 @@ static void wait_surface_retired() noexcept {
+   if (const auto status = g_instance.WaitAny(future, 1000000000); status != wgpu::WaitStatus::Success) {
+     Log.warn("Timed out waiting for queue idle on surface release: {}", magic_enum::enum_name(status));
+   }
++#ifdef WEBGPU_DAWN
+   g_device.Tick();
++#endif
+ }
+ 
+ static bool create_surface() {
+@@ -979,12 +987,14 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
+     std::vector<wgpu::FeatureName> requiredFeatures;
+     // Optional native sharing for MetalFX. Devices without either feature keep
+     // the normal renderer; the upscaler checks the enabled pair at runtime.
++#ifdef WEBGPU_DAWN
+     if (backend == wgpu::BackendType::Metal &&
+         g_adapter.HasFeature(wgpu::FeatureName::SharedTextureMemoryIOSurface) &&
+         g_adapter.HasFeature(wgpu::FeatureName::SharedFenceMTLSharedEvent)) {
+       requiredFeatures.push_back(wgpu::FeatureName::SharedTextureMemoryIOSurface);
+       requiredFeatures.push_back(wgpu::FeatureName::SharedFenceMTLSharedEvent);
+     }
++#endif
+ 
+     g_hasCoreFeatures = false;
+     g_bcTexturesSupported = false;
+@@ -1108,7 +1118,9 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
+     if (!g_device) {
+       return false;
+     }
++#ifdef WEBGPU_DAWN
+     g_device.SetLoggingCallback(wgpu_log);
++#endif
+   }
+   g_queue = g_device.GetQueue();
+ 
+diff --git a/lib/webgpu/web_extensions.cpp b/lib/webgpu/web_extensions.cpp
+new file mode 100644
+index 0000000..ba2a7ce
+--- /dev/null
++++ b/lib/webgpu/web_extensions.cpp
+@@ -0,0 +1,109 @@
++#include "web_extensions.hpp"
++#include "gpu.hpp"
++
++#include <aurora/webgpu.hpp>
++
++#include <SDL3/SDL_properties.h>
++#include <SDL3/SDL_video.h>
++#include <emscripten.h>
++
++#include <string>
++#include <vector>
++
++// `WebGPU` is the emdawnwebgpu runtime: getJsObject maps a handle to its GPU* object, and
++// importJs<Object> registers a JS object and returns a new handle that owns one reference.
++
++EM_JS(WGPUPipelineLayout, aurora_web_create_pipeline_layout,
++      (WGPUDevice device, const WGPUBindGroupLayout* layouts, uint32_t layoutCount, uint32_t immediateSize), {
++  const bindGroupLayouts = [];
++  for (let i = 0; i < layoutCount; ++i) {
++    bindGroupLayouts.push(WebGPU.getJsObject(HEAPU32[(layouts >> 2) + i]));
++  }
++  const layout = WebGPU.getJsObject(device).createPipelineLayout({bindGroupLayouts, immediateSize});
++  return WebGPU.importJsPipelineLayout(layout);
++});
++
++EM_ASYNC_JS(void, aurora_web_wait_for_animation_frame, (), {
++  await new Promise((resolve) => requestAnimationFrame(resolve));
++});
++
++EM_ASYNC_JS(void, aurora_web_yield_to_browser, (), {
++  // A MessageChannel round trip is a full task without setTimeout's minimum delay.
++  if (!globalThis.auroraYieldChannel) {
++    const channel = new MessageChannel();
++    globalThis.auroraYieldChannel = { port: channel.port2, waiters: [] };
++    channel.port1.onmessage = () => globalThis.auroraYieldChannel.waiters.shift()?.();
++  }
++  await new Promise((resolve) => {
++    globalThis.auroraYieldChannel.waiters.push(resolve);
++    globalThis.auroraYieldChannel.port.postMessage(0);
++  });
++});
++
++EM_JS(int, aurora_web_preferred_canvas_format_is_bgra, (), {
++  return navigator.gpu.getPreferredCanvasFormat() === 'bgra8unorm' ? 1 : 0;
++});
++
++EM_JS(void, aurora_web_set_immediates,
++      (WGPURenderPassEncoder pass, uint32_t offset, const void* data, uint32_t size), {
++  WebGPU.getJsObject(pass).setImmediates(offset, HEAPU8, data, size);
++});
++
++namespace aurora::webgpu::web {
++
++wgpu::PipelineLayout create_pipeline_layout(const wgpu::Device& device, const wgpu::PipelineLayoutDescriptor& desc) {
++  std::vector<WGPUBindGroupLayout> layouts(desc.bindGroupLayoutCount);
++  for (size_t i = 0; i < layouts.size(); ++i) {
++    layouts[i] = desc.bindGroupLayouts[i].Get();
++  }
++  return wgpu::PipelineLayout::Acquire(aurora_web_create_pipeline_layout(
++      device.Get(), layouts.data(), static_cast<uint32_t>(layouts.size()), desc.immediateSize));
++}
++
++void set_immediates(const wgpu::RenderPassEncoder& pass, uint32_t offset, const void* data, uint32_t size) {
++  aurora_web_set_immediates(pass.Get(), offset, data, size);
++}
++
++void yield_to_browser() { aurora_web_yield_to_browser(); }
++
++wgpu::TextureFormat preferred_canvas_format() {
++  // The spec allows only these two.
++  return aurora_web_preferred_canvas_format_is_bgra() ? wgpu::TextureFormat::BGRA8Unorm
++                                                      : wgpu::TextureFormat::RGBA8Unorm;
++}
++
++wgpu::Status present(const wgpu::Surface& surface) {
++  if (!surface) {
++    return wgpu::Status::Error;
++  }
++  aurora_web_wait_for_animation_frame();
++  return wgpu::Status::Success;
++}
++
++} // namespace aurora::webgpu::web
++
++namespace aurora::webgpu {
++
++// lib/webgpu/gpu_cache.cpp is Dawn's on-disk blob cache; browsers keep their own.
++void cache_prune() {}
++void cache_shutdown() {}
++
++// The window's canvas, as SDL3's Emscripten video driver reports it.
++wgpu::Surface create_window_surface(const wgpu::Instance& instance, SDL_Window* window, const char* label) {
++  if (!instance || window == nullptr) {
++    return nullptr;
++  }
++  const char* canvasId = SDL_GetStringProperty(SDL_GetWindowProperties(window),
++                                               SDL_PROP_WINDOW_EMSCRIPTEN_CANVAS_ID_STRING, "#canvas");
++  // SDL reports the CSS id selector ("#canvas"); accept a bare id too.
++  const std::string selector = canvasId[0] == '#' ? std::string(canvasId) : std::string("#") + canvasId;
++  wgpu::EmscriptenSurfaceSourceCanvasHTMLSelector canvas{};
++  canvas.selector = selector.c_str();
++  const wgpu::SurfaceDescriptor descriptor{
++      .nextInChain = &canvas,
++      .label = label,
++  };
++  return instance.CreateSurface(&descriptor);
++}
++
++} // namespace aurora::webgpu
+diff --git a/lib/webgpu/web_extensions.hpp b/lib/webgpu/web_extensions.hpp
+new file mode 100644
+index 0000000..848dee1
+--- /dev/null
++++ b/lib/webgpu/web_extensions.hpp
+@@ -0,0 +1,36 @@
++#pragma once
++
++// Browser WebGPU features that the emdawnwebgpu port bundled with Emscripten does not wrap yet.
++// Chromium implements immediate data (`setImmediates`, WGSL `var<immediate>`), but the port's
++// createPipelineLayout drops `immediateSize` and it has no RenderPassEncoder::SetImmediates. These
++// call the JS API directly. Native builds use Dawn's own entry points instead. The surface helpers
++// replace lib/dawn/BackendBinding.cpp, which is Dawn-native only.
++#ifdef __EMSCRIPTEN__
++#include <webgpu/webgpu_cpp.h>
++
++#include <cstdint>
++
++namespace aurora::webgpu::web {
++
++// Device::CreatePipelineLayout, forwarding desc.immediateSize.
++wgpu::PipelineLayout create_pipeline_layout(const wgpu::Device& device, const wgpu::PipelineLayoutDescriptor& desc);
++
++// RenderPassEncoder::SetImmediates.
++void set_immediates(const wgpu::RenderPassEncoder& pass, uint32_t offset, const void* data, uint32_t size);
++
++// navigator.gpu.getPreferredCanvasFormat(): the format the browser composites without a copy, and
++// on some setups the only one it can allocate a canvas swap chain for.
++wgpu::TextureFormat preferred_canvas_format();
++
++// Suspends the calling stack (JSPI) and lets the browser run one event-loop task: the web form of
++// "block until the GPU makes progress", since WebGPU callbacks are only delivered from the event
++// loop. Returns after roughly one task, not after any particular event; callers re-check.
++void yield_to_browser();
++
++// Surface::Present. A canvas shows its current texture when the page renders, so this suspends the
++// calling stack (JSPI) until the next animation frame; the frame submitted before it is what the
++// browser presents. Needs the caller to run on a JSPI stack (the web runtime's main()).
++wgpu::Status present(const wgpu::Surface& surface);
++
++} // namespace aurora::webgpu::web
++#endif

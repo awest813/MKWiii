@@ -389,6 +389,24 @@ Each phase ends with something testable and adds a CI job, so it doesn't regress
   host thread's TLS. `host_context_tests` and the new `host_context_stress_tests` run against it
   natively in the platform test suite.
 
+- **Emscripten (Phase 1–3).** The ISA differential, the host-platform test suite and both web
+  HostContext backends run under Emscripten 6.0.13 in Node (CI job `web_isa`). Every
+  `runtime/src` file compiles for wasm32 (the remainder are generated per game or native-only).
+- **aurora on the web (Phase 4, first light).** `runtime/web/aurora/aurora-web.patch` (applied by
+  `runtime/web/apply-aurora-patch.sh`, to be upstreamed to the aurora fork) builds aurora's
+  runtime-facing libraries against Emscripten's `emdawnwebgpu`:
+  - Dawn-native-only code (toggles, logging callback, `Tick`, shared texture memory, blob cache,
+    backend bindings) is compiled out with the existing `WEBGPU_DAWN` switch.
+  - The SQLite pipeline cache is compiled out (`AURORA_PIPELINE_CACHE_DB`); browsers keep their
+    own shader caches.
+  - The render worker runs inline; timed `WaitAny` suspends through JSPI; presenting and waiting
+    for GPU progress yield to the event loop (`lib/webgpu/web_extensions.*`), which also shims
+    immediate data (`setImmediates`) that the bundled port does not wrap yet.
+  - `runtime/web/smoke` renders 120 frames of a GX app through aurora in headless Chromium and
+    checks the presented pixels (CI job `web_smoke`). Headless Chromium here cannot allocate a
+    WebGPU canvas swap chain on SwiftShader, so the harness substitutes an offscreen texture for
+    the canvas's; everything up to the browser's compositing step runs for real.
+
 ### Measured
 
 - Switch cost (`host_context_stress_tests`, 4-core x86-64 Linux):

@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>aurora smoke</title>
+<style>body { margin: 0; background: #000; } canvas { display: block; width: 640px; height: 480px; }</style>
+</head>
+<body>
+<canvas id="canvas" width="640" height="480"></canvas>
+<script>
+var Module = {
+  canvas: document.getElementById('canvas'),
+  print: (text) => console.log(text),
+  printErr: (text) => console.error(text),
+};
+</script>
+<script>
+// Read by run-smoke.mjs: frames presented so far and main()'s exit status once it returns.
+window.mkwProbe = () => ({ frames: globalThis.mkwSmokeFrames ?? 0, status: globalThis.mkwSmokeStatus ?? null });
+</script>
+<script src="aurora_smoke.js"></script>
+</body>
+</html>

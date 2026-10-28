@@ -105,6 +105,34 @@ jobs:
           cmake --build build-web --parallel 3
           ctest --test-dir build-web --output-on-failure
 
+  web_smoke:
+    name: Web (aurora renders in headless Chromium)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          submodules: true
+
+      - name: Install Emscripten
+        run: |
+          git clone --depth 1 https://github.com/emscripten-core/emsdk.git "$RUNNER_TEMP/emsdk"
+          "$RUNNER_TEMP/emsdk/emsdk" install 6.0.13
+          "$RUNNER_TEMP/emsdk/emsdk" activate 6.0.13
+
+      - name: Build aurora and the smoke app for the web
+        run: |
+          source "$RUNNER_TEMP/emsdk/emsdk_env.sh"
+          runtime/web/apply-aurora-patch.sh
+          emcmake cmake -S runtime/web/smoke -B build-web-smoke -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-web-smoke --parallel 3
+
+      - name: Render it in headless Chromium (WebGPU on SwiftShader)
+        run: |
+          npm install --no-save --prefix "$RUNNER_TEMP/pw" playwright@1.63.0
+          "$RUNNER_TEMP/pw/node_modules/.bin/playwright" install --with-deps chromium
+          NODE_PATH="$RUNNER_TEMP/pw/node_modules" node runtime/web/smoke/run-smoke.mjs build-web-smoke
+
   macos_substrate:
     name: macOS arm64 (configure + substrate tests)
     runs-on: macos-14
