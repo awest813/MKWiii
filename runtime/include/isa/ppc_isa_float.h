@@ -84,6 +84,9 @@ using PpcPairVec = __m128;
 // Only 2 lanes are ever meaningful (a PPC paired-single register), so a 2-lane float32x2_t
 // (one 64-bit D register) is a more natural fit than mirroring x86's 128-bit register usage.
 using PpcPairVec = float32x2_t;
+#elif defined(__wasm__)
+// Same shape as x86: a 128-bit vector whose low two f32 lanes hold ps1 (lane 0) and ps0 (lane 1).
+using PpcPairVec = v128_t;
 #endif
 
 // Must stay inside the vector register domain. Bitcasting through a 64-bit GPR added a movq
@@ -95,6 +98,8 @@ inline PpcPairVec PpcPsToM128Inline(double value)
     return _mm_castpd_ps(_mm_set_sd(value));
 #elif defined(__aarch64__)
     return vreinterpret_f32_f64(vdup_n_f64(value));
+#elif defined(__wasm__)
+    return wasm_f64x2_make(value, 0.0);
 #endif
 }
 
@@ -104,6 +109,8 @@ inline double PpcM128ToPsInline(PpcPairVec value)
     return _mm_cvtsd_f64(_mm_castps_pd(value));
 #elif defined(__aarch64__)
     return vget_lane_f64(vreinterpret_f64_f32(value), 0);
+#elif defined(__wasm__)
+    return wasm_f64x2_extract_lane(value, 0);
 #endif
 }
 
@@ -115,6 +122,9 @@ inline PpcPairVec PpcBroadcastPs0Inline(double value)
 #elif defined(__aarch64__)
     // ps0 lives in lane 1 (see the lane-accessor comment below).
     return vdup_lane_f32(PpcPsToM128Inline(value), 1);
+#elif defined(__wasm__)
+    const v128_t lanes = PpcPsToM128Inline(value);
+    return wasm_i32x4_shuffle(lanes, lanes, 1, 1, 1, 1);
 #endif
 }
 
@@ -126,6 +136,9 @@ inline PpcPairVec PpcBroadcastPs1Inline(double value)
 #elif defined(__aarch64__)
     // ps1 is already lane 0.
     return vdup_lane_f32(PpcPsToM128Inline(value), 0);
+#elif defined(__wasm__)
+    const v128_t lanes = PpcPsToM128Inline(value);
+    return wasm_i32x4_shuffle(lanes, lanes, 0, 0, 0, 0);
 #endif
 }
 
@@ -142,6 +155,9 @@ inline PpcPairVec PpcNegateNonNanLanesInline(PpcPairVec value)
     // NEON has no direct "ordered compare"; a value compares equal to itself iff it's not NaN.
     const uint32x2_t ordered = vceq_f32(value, value);
     return vbsl_f32(ordered, negated, value);
+#elif defined(__wasm__)
+    const v128_t negated = wasm_v128_xor(value, wasm_i32x4_splat(static_cast<int32_t>(0x80000000u)));
+    return wasm_v128_bitselect(negated, value, wasm_f32x4_eq(value, value));
 #endif
 }
 
@@ -157,6 +173,8 @@ inline float PpcGetPs0Inline(double value)
     return _mm_cvtss_f32(PpcBroadcastPs0Inline(value));
 #elif defined(__aarch64__)
     return vget_lane_f32(PpcBroadcastPs0Inline(value), 0);
+#elif defined(__wasm__)
+    return wasm_f32x4_extract_lane(PpcPsToM128Inline(value), 1);
 #endif
 }
 
@@ -167,6 +185,8 @@ inline float PpcGetPs1Inline(double value)
     return _mm_cvtss_f32(PpcPsToM128Inline(value));
 #elif defined(__aarch64__)
     return vget_lane_f32(PpcPsToM128Inline(value), 0);
+#elif defined(__wasm__)
+    return wasm_f32x4_extract_lane(PpcPsToM128Inline(value), 0);
 #endif
 }
 
@@ -180,6 +200,8 @@ inline double PpcPackPairedInline(float ps0, float ps1)
     // Lane 0 = ps1, lane 1 = ps0, matching the union layout bit for bit.
     const float32x2_t lane0 = vdup_n_f32(ps1);
     return PpcM128ToPsInline(vset_lane_f32(ps0, lane0, 1));
+#elif defined(__wasm__)
+    return PpcM128ToPsInline(wasm_f32x4_make(ps1, ps0, 0.0f, 0.0f));
 #endif
 }
 
@@ -213,6 +235,10 @@ inline float PpcForceSingleValueInline(double value)
     const uint64x1_t signOnly = vand_u64(vreinterpret_u64_f64(v), signMask);
     const uint64x1_t kept = vbsl_u64(flush, signOnly, vreinterpret_u64_f64(v));
     return static_cast<float>(vget_lane_f64(vreinterpret_f64_u64(kept), 0));
+#elif defined(__wasm__)
+    // Same mask as above, in scalar form: a NaN magnitude compares false and passes through.
+    const double kept = std::fabs(value) < g_mkwNiFlushThreshold ? std::copysign(0.0, value) : value;
+    return static_cast<float>(kept);
 #endif
 }
 
@@ -228,7 +254,8 @@ inline float PpcFlushSingleForNiInline(float value)
 
 inline double PpcFlushPairedForNiInline(double value)
 {
-    // Callers pass results of SSE arithmetic; MXCSR.FTZ already flushed them.
+    // Callers pass results of SSE/NEON arithmetic; MXCSR.FTZ/FPCR.FZ already flushed them. The
+    // wasm pair primitives flush their own inputs and outputs (PpcWasmNiPairInline).
     return value;
 }
 
@@ -419,6 +446,23 @@ inline double PpcPackIntegerWordInline(int32_t value)
         static_cast<uint64_t>(static_cast<uint32_t>(value)));
 }
 
+// Double-precision fused multiply-add. Wasm has no FMA instruction, so std::fma is libc's
+// software routine, and musl's (used by both wasi-libc and Emscripten) returns `a*c + b` when b is
+// zero: a nonzero product that underflows to -0 then becomes -0 + +0 = +0 instead of the -0 the
+// exact result rounds to. The exact answer for a zero addend and two nonzero factors is just the
+// once-rounded product, which the guard returns directly.
+inline double PpcFmaDoubleInline(double a, double c, double b)
+{
+#if defined(__wasm__)
+    if (b == 0.0 && a != 0.0 && c != 0.0) {
+        const double product = a * c;
+        if (product == 0.0)
+            return product;
+    }
+#endif
+    return std::fma(a, c, b);
+}
+
 template <bool Subtract>
 inline float PpcAccuratePsMaddLaneInline(float a, float c, float b)
 {
@@ -447,7 +491,7 @@ inline double PpcAccurateSingleMaddIntermediateInline(double a, double c, double
     // Recover the direction of that discarded error for those tie cases.
     const double roundedC = PpcForce25BitInline(c);
     const double signedB = Subtract ? -b : b;
-    double result = std::fma(a, roundedC, signedB);
+    double result = PpcFmaDoubleInline(a, roundedC, signedB);
     const uint64_t resultBits = PpcBitCastToU64Inline(result);
     constexpr uint64_t kDiscardedMask = 0x000000001FFFFFFFULL;
     constexpr uint64_t kEvenTie = 0x0000000010000000ULL;
@@ -455,7 +499,7 @@ inline double PpcAccurateSingleMaddIntermediateInline(double a, double c, double
     {
         const double aPrime = signedB - result;
         const double bPrime = result + aPrime;
-        const double deltaA = std::fma(a, roundedC, aPrime);
+        const double deltaA = PpcFmaDoubleInline(a, roundedC, aPrime);
         const double deltaB = signedB - bPrime;
         const double error = deltaA + deltaB;
         if (error != 0.0)
@@ -480,23 +524,23 @@ inline double PpcFmulsNoNiInline(double a, double c)
 
 inline double PpcFmaddInline(double a, double c, double b)
 {
-    return std::fma(a, c, b);
+    return PpcFmaDoubleInline(a, c, b);
 }
 
 inline double PpcFmsubInline(double a, double c, double b)
 {
-    return std::fma(a, c, -b);
+    return PpcFmaDoubleInline(a, c, -b);
 }
 
 inline double PpcFnmaddInline(double a, double c, double b)
 {
-    const double result = std::fma(a, c, b);
+    const double result = PpcFmaDoubleInline(a, c, b);
     return std::isnan(result) ? result : -result;
 }
 
 inline double PpcFnmsubInline(double a, double c, double b)
 {
-    const double result = std::fma(a, c, -b);
+    const double result = PpcFmaDoubleInline(a, c, -b);
     return std::isnan(result) ? result : -result;
 }
 
@@ -571,6 +615,117 @@ inline PpcPairVec PpcResolveNanLanes3Inline(
 }
 #endif // defined(__aarch64__)
 
+#if defined(__wasm__)
+// Wasm leaves NaN payloads of arithmetic results nondeterministic, so NaN result lanes are
+// rewritten to the x86 answer exactly like the AArch64 branch above does.
+inline uint64_t PpcPairNanLaneBitsInline(PpcPairVec value)
+{
+    return static_cast<uint64_t>(wasm_i64x2_extract_lane(wasm_v128_not(wasm_f32x4_eq(value, value)), 0));
+}
+
+inline PpcPairVec PpcQuietPairInline(PpcPairVec value)
+{
+    return wasm_v128_or(value, wasm_i32x4_splat(0x00400000));
+}
+
+inline PpcPairVec PpcResolveNanLanesInline(PpcPairVec result, PpcPairVec op1, PpcPairVec op2)
+{
+    PpcPairVec replacement = wasm_i32x4_splat(static_cast<int32_t>(0xFFC00000u));
+    replacement = wasm_v128_bitselect(PpcQuietPairInline(op2), replacement, wasm_f32x4_ne(op2, op2));
+    replacement = wasm_v128_bitselect(PpcQuietPairInline(op1), replacement, wasm_f32x4_ne(op1, op1));
+    return wasm_v128_bitselect(replacement, result, wasm_f32x4_ne(result, result));
+}
+
+inline PpcPairVec PpcResolveNanLanes3Inline(
+    PpcPairVec result, PpcPairVec op1, PpcPairVec op2, PpcPairVec op3)
+{
+    PpcPairVec replacement = wasm_i32x4_splat(static_cast<int32_t>(0xFFC00000u));
+    replacement = wasm_v128_bitselect(PpcQuietPairInline(op3), replacement, wasm_f32x4_ne(op3, op3));
+    replacement = wasm_v128_bitselect(PpcQuietPairInline(op2), replacement, wasm_f32x4_ne(op2, op2));
+    replacement = wasm_v128_bitselect(PpcQuietPairInline(op1), replacement, wasm_f32x4_ne(op1, op1));
+    return wasm_v128_bitselect(replacement, result, wasm_f32x4_ne(result, result));
+}
+
+// Software stand-in for MXCSR DAZ: zero (keeping the sign) every lane whose magnitude is below
+// FLT_MIN. Applied to the inputs of the pair primitives while FPSCR[NI] is set.
+inline PpcPairVec PpcWasmFlushDenormalLanesInline(PpcPairVec value)
+{
+    const v128_t sign = wasm_i32x4_splat(static_cast<int32_t>(0x80000000u));
+    const v128_t magnitude = wasm_v128_andnot(value, sign);
+    const v128_t denormal = wasm_u32x4_lt(magnitude, wasm_i32x4_splat(0x00800000));
+    return wasm_v128_bitselect(wasm_v128_and(value, sign), value, denormal);
+}
+
+// Software stand-in for MXCSR FTZ on one result lane. x86 detects tininess after rounding to
+// 24 bits with an unbounded exponent, so a result whose denormal-format rounding reaches FLT_MIN
+// is still flushed when its unbounded rounding stays below it. `nearExact` is the operation
+// evaluated in double (exact for products, sums and FMAs of floats in this range); scaling it
+// by 2^200 moves the boundary into the normal range so the float conversion rounds unbounded.
+inline float PpcWasmFtzLaneInline(float rounded, double nearExact)
+{
+    if (!(std::fabs(rounded) <= 0x1p-125f))
+        return rounded;  // too large to be tiny, or NaN
+    if (std::fabs(static_cast<float>(nearExact * 0x1p200)) < 0x1p74f)
+        return std::copysign(0.0f, rounded);
+    return rounded;
+}
+
+// Pair arithmetic with FPSCR[NI] modeled. `vectorOp` produces the correctly rounded lanes and
+// `nearExactOp` the per-lane double evaluation used only for the FTZ decision under NI.
+template <typename VectorOp, typename NearExactOp>
+MKW_PPC_FORCE_INLINE PpcPairVec PpcWasmPairOpInline(
+    PpcPairVec lhs, PpcPairVec rhs, VectorOp vectorOp, NearExactOp nearExactOp)
+{
+    PpcPairVec result;
+    if (MkwHostNiActiveInline()) [[unlikely]] {
+        lhs = PpcWasmFlushDenormalLanesInline(lhs);
+        rhs = PpcWasmFlushDenormalLanesInline(rhs);
+        const PpcPairVec rounded = vectorOp(lhs, rhs);
+        const auto lane = [&](float value, float x, float y) {
+            return PpcWasmFtzLaneInline(value, nearExactOp(static_cast<double>(x), static_cast<double>(y)));
+        };
+        result = wasm_f32x4_make(
+            lane(wasm_f32x4_extract_lane(rounded, 0), wasm_f32x4_extract_lane(lhs, 0), wasm_f32x4_extract_lane(rhs, 0)),
+            lane(wasm_f32x4_extract_lane(rounded, 1), wasm_f32x4_extract_lane(lhs, 1), wasm_f32x4_extract_lane(rhs, 1)),
+            0.0f, 0.0f);
+    } else {
+        result = vectorOp(lhs, rhs);
+    }
+    if (PpcPairNanLaneBitsInline(result) != 0) [[unlikely]]
+        return PpcResolveNanLanesInline(result, lhs, rhs);
+    return result;
+}
+
+// Wasm has no fused multiply-add instruction; std::fma is exact (software) on every engine,
+// which keeps Gekko's single rounding point. A relaxed-SIMD fast path can replace this once a
+// startup probe proves the engine fuses.
+template <bool Subtract>
+inline PpcPairVec PpcWasmFmaPairInline(PpcPairVec a, PpcPairVec c, PpcPairVec b)
+{
+    const bool ni = MkwHostNiActiveInline();
+    if (ni) [[unlikely]] {
+        a = PpcWasmFlushDenormalLanesInline(a);
+        c = PpcWasmFlushDenormalLanesInline(c);
+        b = PpcWasmFlushDenormalLanesInline(b);
+    }
+    const auto lane = [ni](float x, float y, float z) {
+        const float addend = Subtract ? -z : z;
+        const float rounded = std::fma(x, y, addend);
+        if (!ni) [[likely]]
+            return rounded;
+        return PpcWasmFtzLaneInline(rounded, PpcFmaDoubleInline(
+            static_cast<double>(x), static_cast<double>(y), static_cast<double>(addend)));
+    };
+    const PpcPairVec result = wasm_f32x4_make(
+        lane(wasm_f32x4_extract_lane(a, 0), wasm_f32x4_extract_lane(c, 0), wasm_f32x4_extract_lane(b, 0)),
+        lane(wasm_f32x4_extract_lane(a, 1), wasm_f32x4_extract_lane(c, 1), wasm_f32x4_extract_lane(b, 1)),
+        0.0f, 0.0f);
+    if (PpcPairNanLaneBitsInline(result) != 0) [[unlikely]]
+        return PpcResolveNanLanes3Inline(result, a, c, b);
+    return result;
+}
+#endif // defined(__wasm__)
+
 inline PpcPairVec PpcMulPairInline(PpcPairVec lhs, PpcPairVec rhs)
 {
 #if defined(__x86_64__)
@@ -580,6 +735,10 @@ inline PpcPairVec PpcMulPairInline(PpcPairVec lhs, PpcPairVec rhs)
     if (PpcPairNanLaneBitsInline(result) != 0) [[unlikely]]
         return PpcResolveNanLanesInline(result, lhs, rhs);
     return result;
+#elif defined(__wasm__)
+    return PpcWasmPairOpInline(lhs, rhs,
+        [](v128_t x, v128_t y) { return wasm_f32x4_mul(x, y); },
+        [](double x, double y) { return x * y; });
 #endif
 }
 
@@ -624,6 +783,8 @@ inline PpcPairVec PpcFmaddPairInline(PpcPairVec multiplicand, PpcPairVec multipl
     if (PpcPairNanLaneBitsInline(result) != 0) [[unlikely]]
         return PpcResolveNanLanes3Inline(result, multiplicand, multiplier, addend);
     return result;
+#elif defined(__wasm__)
+    return PpcWasmFmaPairInline<false>(multiplicand, multiplier, addend);
 #endif
 }
 
@@ -645,6 +806,8 @@ inline PpcPairVec PpcFmsubPairInline(PpcPairVec multiplicand, PpcPairVec multipl
     if (PpcPairNanLaneBitsInline(result) != 0) [[unlikely]]
         return PpcResolveNanLanes3Inline(result, multiplicand, multiplier, subtractor);
     return result;
+#elif defined(__wasm__)
+    return PpcWasmFmaPairInline<true>(multiplicand, multiplier, subtractor);
 #endif
 }
 
@@ -746,7 +909,7 @@ inline double PPC_PsMerge00Inline(double aValue, double bValue)
     const __m128 gathered = _mm_shuffle_ps(
         PpcPsToM128Inline(bValue), PpcPsToM128Inline(aValue), _MM_SHUFFLE(1, 1, 1, 1));
     return PpcM128ToPsInline(_mm_shuffle_ps(gathered, gathered, _MM_SHUFFLE(0, 0, 2, 0)));
-#elif defined(__aarch64__)
+#else
     return PpcPackPairedInline(PpcGetPs0Inline(aValue), PpcGetPs0Inline(bValue));
 #endif
 }
@@ -758,7 +921,7 @@ inline double PPC_PsMerge01Inline(double aValue, double bValue)
     const __m128 gathered = _mm_shuffle_ps(
         PpcPsToM128Inline(bValue), PpcPsToM128Inline(aValue), _MM_SHUFFLE(1, 1, 0, 0));
     return PpcM128ToPsInline(_mm_shuffle_ps(gathered, gathered, _MM_SHUFFLE(0, 0, 2, 0)));
-#elif defined(__aarch64__)
+#else
     return PpcPackPairedInline(PpcGetPs0Inline(aValue), PpcGetPs1Inline(bValue));
 #endif
 }
@@ -770,7 +933,7 @@ inline double PPC_PsMerge10Inline(double aValue, double bValue)
     const __m128 gathered = _mm_shuffle_ps(
         PpcPsToM128Inline(bValue), PpcPsToM128Inline(aValue), _MM_SHUFFLE(0, 0, 1, 1));
     return PpcM128ToPsInline(_mm_shuffle_ps(gathered, gathered, _MM_SHUFFLE(0, 0, 2, 0)));
-#elif defined(__aarch64__)
+#else
     return PpcPackPairedInline(PpcGetPs1Inline(aValue), PpcGetPs0Inline(bValue));
 #endif
 }
@@ -782,7 +945,7 @@ inline double PPC_PsMerge11Inline(double aValue, double bValue)
 #if defined(__x86_64__)
     return PpcM128ToPsInline(
         _mm_unpacklo_ps(PpcPsToM128Inline(bValue), PpcPsToM128Inline(aValue)));
-#elif defined(__aarch64__)
+#else
     return PpcPackPairedInline(PpcGetPs1Inline(aValue), PpcGetPs1Inline(bValue));
 #endif
 }
@@ -796,6 +959,10 @@ inline PpcPairVec PpcAddPairInline(PpcPairVec lhs, PpcPairVec rhs)
     if (PpcPairNanLaneBitsInline(result) != 0) [[unlikely]]
         return PpcResolveNanLanesInline(result, lhs, rhs);
     return result;
+#elif defined(__wasm__)
+    return PpcWasmPairOpInline(lhs, rhs,
+        [](v128_t x, v128_t y) { return wasm_f32x4_add(x, y); },
+        [](double x, double y) { return x + y; });
 #endif
 }
 
@@ -808,6 +975,10 @@ inline PpcPairVec PpcSubPairInline(PpcPairVec lhs, PpcPairVec rhs)
     if (PpcPairNanLaneBitsInline(result) != 0) [[unlikely]]
         return PpcResolveNanLanesInline(result, lhs, rhs);
     return result;
+#elif defined(__wasm__)
+    return PpcWasmPairOpInline(lhs, rhs,
+        [](v128_t x, v128_t y) { return wasm_f32x4_sub(x, y); },
+        [](double x, double y) { return x - y; });
 #endif
 }
 
@@ -820,6 +991,10 @@ inline PpcPairVec PpcDivPairInline(PpcPairVec lhs, PpcPairVec rhs)
     if (PpcPairNanLaneBitsInline(result) != 0) [[unlikely]]
         return PpcResolveNanLanesInline(result, lhs, rhs);
     return result;
+#elif defined(__wasm__)
+    return PpcWasmPairOpInline(lhs, rhs,
+        [](v128_t x, v128_t y) { return wasm_f32x4_div(x, y); },
+        [](double x, double y) { return x / y; });
 #endif
 }
 

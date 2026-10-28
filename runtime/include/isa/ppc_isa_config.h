@@ -8,6 +8,9 @@
 #include <immintrin.h>
 #elif defined(__aarch64__)
 #include <arm_neon.h>
+#elif defined(__wasm__)
+// Web build: requires -msimd128. Paired singles live in the low two f32 lanes, like x86.
+#include <wasm_simd128.h>
 #else
 #error "ppc_isa_config.h has no SIMD intrinsics header for this architecture"
 #endif

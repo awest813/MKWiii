@@ -70,6 +70,25 @@ jobs:
           cmake --build build-platform --parallel 3
           ctest --test-dir build-platform --output-on-failure
 
+  web_isa:
+    name: Web ISA (wasm32 vs native digests)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install the wasm32-wasi sysroot
+        run: >-
+          sudo apt-get update &&
+          sudo apt-get install -y --no-install-recommends clang-18 lld-18
+          wasi-libc libc++-18-dev-wasm32 libc++abi-18-dev-wasm32 libclang-rt-18-dev-wasm32
+
+      - name: Compare native and wasm32 ISA helper digests
+        env:
+          CXX: clang++-18
+        run: runtime/web/isa-differential.sh
+
   macos_substrate:
     name: macOS arm64 (configure + substrate tests)
     runs-on: macos-14

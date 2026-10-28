@@ -21,6 +21,12 @@ inline constexpr uint32_t kMkwFpControlFlushToZeroBits = (1u << 15) | (1u << 6);
 // inputs and outputs - actually a cleaner match to the "flush everything" trade above than x86's
 // two-bit combo, not an extra deviation.
 inline constexpr uint32_t kMkwFpControlFlushToZeroBits = (1u << 24); // FZ
+#elif defined(__wasm__)
+// WebAssembly has no FP control register and always keeps IEEE denormals. The "register" is a
+// thread-local word so the mirror bookkeeping below stays shared; the flushing it would have
+// done in hardware is done in software by the __wasm__ branches of ppc_isa_float.h.
+inline constexpr uint32_t kMkwFpControlFlushToZeroBits = 1u;
+inline thread_local uint32_t g_mkwWasmFpControl = 0;
 #else
 #error "ppc_isa_fpenv.h has no host FP control register mapping for this architecture"
 #endif
@@ -44,6 +50,8 @@ inline uint32_t MkwGetHostFpControl() noexcept
     uint64_t fpcr = 0;
     __asm__ __volatile__("mrs %0, fpcr" : "=r"(fpcr));
     return static_cast<uint32_t>(fpcr);
+#elif defined(__wasm__)
+    return g_mkwWasmFpControl;
 #endif
 }
 
@@ -58,6 +66,8 @@ inline void MkwSetHostFpControl(uint32_t value) noexcept
     __asm__ __volatile__("mrs %0, fpcr" : "=r"(fpcr));
     fpcr = (fpcr & ~static_cast<uint64_t>(0xFFFFFFFFu)) | value;
     __asm__ __volatile__("msr fpcr, %0" :: "r"(fpcr));
+#elif defined(__wasm__)
+    g_mkwWasmFpControl = value;
 #endif
 }
 
