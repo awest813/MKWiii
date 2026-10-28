@@ -1,7 +1,8 @@
 // Round-robin stress test for a HostContext backend: several contexts take turns through the
 // scheduler for many rounds. Checks that exactly one context ever runs at a time, that every
 // Switch() resumes the context it targeted at its own continuation point, that plain (non-atomic)
-// state written by one context is visible to the next, that contexts leaving through ExitTo()
+// state written by one context is visible to the next, that each context's stack memory survives
+// while it is switched out, that contexts leaving through ExitTo()
 // hand over correctly, and that destroying contexts - ones that never ran, ones that exited and
 // ones parked mid-run - leaves the others working. With the thread backend on Linux it also checks
 // that the threads of never-run and exited contexts really end. Prints the mean cost of one
@@ -75,10 +76,45 @@ void ExitingWorker(void*)
     HostContext::ExitTo(g_scheduler);
 }
 
+// Memory each context keeps on its own stack across switches. `volatile` and passing its address
+// out keep it in addressable stack memory (a shadow stack on wasm) rather than in registers.
+void FillStackCanary(volatile uint32_t* canary, int count, uint32_t seed)
+{
+    for (int i = 0; i < count; ++i) canary[i] = seed * 2654435761u + static_cast<uint32_t>(i);
+}
+
+bool CheckStackCanary(const volatile uint32_t* canary, int count, uint32_t seed)
+{
+    for (int i = 0; i < count; ++i) {
+        if (canary[i] != seed * 2654435761u + static_cast<uint32_t>(i)) return false;
+    }
+    return true;
+}
+
+// Switches away from `depth` nested frames, each holding its own canary, so contexts suspend at
+// different and changing stack depths, as guest threads do.
+void SwitchFromDepth(int index, int depth)
+{
+    volatile uint32_t frame[32];
+    const uint32_t seed = static_cast<uint32_t>(index * 1000 + depth);
+    FillStackCanary(frame, 32, seed);
+    if (depth > 0) {
+        SwitchFromDepth(index, depth - 1);
+    } else {
+        HostContext::Switch(g_scheduler);
+    }
+    if (!CheckStackCanary(frame, 32, seed)) Fail("a context's stack frame changed while it was switched out");
+}
+
 void Worker(void* argument)
 {
     const int index = static_cast<int>(reinterpret_cast<intptr_t>(argument));
+    volatile uint32_t canary[256];
+    FillStackCanary(canary, 256, static_cast<uint32_t>(index) + 1);
     for (long round = 0;; ++round) {
+        if (!CheckStackCanary(canary, 256, static_cast<uint32_t>(index) + 1)) {
+            Fail("a context's stack memory changed while it was switched out");
+        }
         if (g_inside.fetch_add(1) != 0) Fail("two contexts ran at once");
         if (!HostContext::IsCurrent(g_workers[index])) Fail("IsCurrent lost the worker identity");
         if (g_expectedWorker != index) Fail("Switch resumed the wrong context");
@@ -86,7 +122,7 @@ void Worker(void* argument)
         ++g_perWorker[index];
         ++g_sharedCounter;
         g_inside.fetch_sub(1);
-        HostContext::Switch(g_scheduler);
+        SwitchFromDepth(index, static_cast<int>((round * 7 + index * 3) % 24));
     }
 }
 } // namespace
@@ -132,7 +168,12 @@ int main(int argc, char** argv)
 
     const auto start = std::chrono::steady_clock::now();
     long switches = 0;
+    volatile uint32_t schedulerCanary[256];
+    FillStackCanary(schedulerCanary, 256, 0xC0FFEEu);
     for (int round = 0; round < kRounds; ++round) {
+        if (!CheckStackCanary(schedulerCanary, 256, 0xC0FFEEu)) {
+            Fail("the scheduler's stack memory changed while it was switched out");
+        }
         for (int i = 0; i < g_workerCount; ++i) {
             if (round == kRounds / 2 && i == g_workerCount - 1) {
                 // Destroy one worker parked mid-run; the rest must carry on.

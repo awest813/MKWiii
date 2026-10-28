@@ -3,13 +3,9 @@ get_filename_component(MKW_TEST_RUNTIME_DIR "${CMAKE_CURRENT_LIST_DIR}/.." ABSOL
 # Keep these independent from Aurora's BUILD_TESTING option: they validate the
 # project's host-platform contracts, not Aurora's third-party test suite.
 enable_testing()
-if(MKW_PLATFORM_WEB)
-    # Tests run under Node (CMAKE_CROSSCOMPILING_EMULATOR, set by emcmake) with real host files,
-    # and with workers created up front because Node only starts one when the main thread returns
-    # to its event loop. (Node's main thread may block, unlike a browser's.)
-    add_link_options(-sNODERAWFS=1 -sEXIT_RUNTIME=1 -sPTHREAD_POOL_SIZE=24
-                     -sINITIAL_MEMORY=256MB -sSTACK_SIZE=1MB)
-endif()
+# Web: the test executables get their Node link options at the end of this file. They must not be
+# directory-scoped, because full builds include this file before defining the products.
+get_property(MKW_TARGETS_BEFORE_PLATFORM_TESTS DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
 if(MKW_BUILD_PSQ_TESTS)
     add_executable(mkw_psq_helpers_tests
         "${MKW_TEST_RUNTIME_DIR}/tests/psq_helpers_tests.cpp"
@@ -257,4 +253,19 @@ if(MKW_PLATFORM_MACOS)
     target_include_directories(mkw_macos_external_audio_tests PRIVATE "${MKW_TEST_RUNTIME_DIR}/include")
     target_compile_features(mkw_macos_external_audio_tests PRIVATE cxx_std_17)
     add_test(NAME mkw_macos_external_audio_tests COMMAND mkw_macos_external_audio_tests)
+endif()
+
+if(MKW_PLATFORM_WEB)
+    # Tests run under Node (CMAKE_CROSSCOMPILING_EMULATOR, set by emcmake) with real host files,
+    # and with workers created up front because Node only starts one when the main thread returns
+    # to its event loop. (Node's main thread may block, unlike a browser's.)
+    get_property(mkw_platform_test_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+    list(REMOVE_ITEM mkw_platform_test_targets ${MKW_TARGETS_BEFORE_PLATFORM_TESTS})
+    foreach(target IN LISTS mkw_platform_test_targets)
+        get_target_property(type ${target} TYPE)
+        if(type STREQUAL "EXECUTABLE")
+            target_link_options(${target} PRIVATE -sNODERAWFS=1 -sEXIT_RUNTIME=1
+                -sPTHREAD_POOL_SIZE=24 -sINITIAL_MEMORY=256MB -sSTACK_SIZE=1MB)
+        endif()
+    endforeach()
 endif()

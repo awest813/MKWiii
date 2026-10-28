@@ -300,6 +300,12 @@ else()
     # Every dependency comes from the pinned sources, never the build host.
     set(AURORA_USE_SYSTEM_DEPENDENCIES OFF CACHE BOOL "" FORCE)
 
+    if(MKW_PLATFORM_WEB)
+        # emdawnwebgpu instead of Dawn, SDL3's Emscripten backend, no on-disk caches; also maps
+        # MKW_WEB_DEPS_DIR. Needs runtime/web/aurora/aurora-web.patch applied to aurora-main.
+        include("${CMAKE_CURRENT_LIST_DIR}/web/cmake/AuroraWebOptions.cmake")
+    endif()
+
     # MinGW/WSL can choke on SDL precompiled headers; disable PCH for aurora/SDL.
     set(CMAKE_DISABLE_PRECOMPILE_HEADERS ON)
     # Isolate aurora build products to a subdirectory under the main build dir.

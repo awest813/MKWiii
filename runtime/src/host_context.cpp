@@ -2,7 +2,9 @@
 
 #if defined(MKW_HOST_CONTEXT_JSPI)
 #include <emscripten.h>
+#include <emscripten/stack.h>
 
+#include <cstdint>
 #include <cstdlib>
 #elif defined(MKW_HOST_CONTEXT_THREADS)
 #include <pthread.h>
@@ -49,16 +51,44 @@ namespace HostContext {
 // stack between the promising entry and the suspending import to be wasm only, which holds for
 // guest code: it is never entered from a JS callback.
 //
+// JSPI switches the engine's stack, but not the C "shadow" stack Emscripten keeps in linear memory
+// for address-taken locals: that is one region per thread behind one stack-pointer global. So each
+// context gets its own shadow stack (Create's stackSize), the pointer is saved when a context
+// suspends and restored, with the overflow-check limits, whenever one starts or resumes.
+//
 // The runtime must be linked with -sJSPI -sJSPI_EXPORTS=mkw_host_context_run.
+extern "C" void _emscripten_stack_restore(uintptr_t stackPointer);
+
 namespace {
 struct Context {
     Entry entry = nullptr;
     void* argument = nullptr;
     bool started = false;
     Context* exitTarget = nullptr;
+    // Shadow stack: [stackEnd, stackBase), growing down. The scheduler keeps the thread's own.
+    void* stackAllocation = nullptr;
+    uintptr_t stackBase = 0;
+    uintptr_t stackEnd = 0;
+    uintptr_t savedStackPointer = 0;
 };
 
 Context* g_current = nullptr;
+} // namespace
+
+// STACK_OVERFLOW_CHECK=2 builds check every stack-pointer write against limits of their own, set
+// through this export (Emscripten's pthread startup does the same).
+EM_JS(void, mkw_host_context_js_set_checked_limits, (uintptr_t base, uintptr_t end), {
+    wasmExports["__set_stack_limits"]?.(base, end);
+});
+
+namespace {
+void UseStack(const Context* context, uintptr_t stackPointer)
+{
+    emscripten_stack_set_limits(reinterpret_cast<void*>(context->stackBase),
+                                reinterpret_cast<void*>(context->stackEnd));
+    mkw_host_context_js_set_checked_limits(context->stackBase, context->stackEnd);
+    _emscripten_stack_restore(stackPointer);
+}
 } // namespace
 
 EM_JS(void, mkw_host_context_js_init, (), {
@@ -76,6 +106,8 @@ EM_JS(void, mkw_host_context_js_init, (), {
                     resume();
                     return;
                 }
+                // Move onto the new context's own shadow stack before its first frame.
+                wasmExports["mkw_host_context_enter_stack"](target);
                 wasmExports["mkw_host_context_run"](target).catch((error) => {
                     // An exception escaping a context has no wasm caller left to catch it.
                     console.error("HostContext: a context ended with an exception", error);
@@ -102,6 +134,15 @@ EM_JS(void, mkw_host_context_js_forget, (void* context), {
     Module.mkwHostContext?.parked.delete(context);
 });
 
+// Called from JS right before mkw_host_context_run starts a context; it has no frame of its own.
+extern "C" EMSCRIPTEN_KEEPALIVE void mkw_host_context_enter_stack(void* argument)
+{
+    const auto* context = static_cast<const Context*>(argument);
+    // One aligned slot below the top: Emscripten's stack-overflow checking (STACK_OVERFLOW_CHECK=2)
+    // rejects a stack pointer equal to the stack base.
+    UseStack(context, context->stackBase - 16);
+}
+
 extern "C" EMSCRIPTEN_KEEPALIVE void mkw_host_context_run(void* argument)
 {
     auto* context = static_cast<Context*>(argument);
@@ -120,6 +161,8 @@ bool InitializeScheduler(Handle* scheduler)
     mkw_host_context_js_init();
     auto* context = new Context();
     context->started = true;
+    context->stackBase = emscripten_stack_get_base();
+    context->stackEnd = emscripten_stack_get_end();
     g_current = context;
     *scheduler = context;
     return true;
@@ -134,12 +177,21 @@ void ShutdownScheduler(Handle scheduler)
     delete context;
 }
 
-Handle Create(std::size_t, Entry entry, void* argument)
+Handle Create(std::size_t stackSize, Entry entry, void* argument)
 {
-    // The stack belongs to the engine (JSPI grows it as needed), so there is no size to apply.
+    // stackSize sizes the shadow stack; the engine's own stack for the context grows as needed.
+    constexpr std::size_t kAlignment = 16;
+    stackSize = (stackSize + kAlignment - 1) & ~(kAlignment - 1);
+    void* stack = std::aligned_alloc(kAlignment, stackSize);
+    if (!stack) {
+        return nullptr;
+    }
     auto* context = new Context();
     context->entry = entry;
     context->argument = argument;
+    context->stackAllocation = stack;
+    context->stackEnd = reinterpret_cast<uintptr_t>(stack);
+    context->stackBase = context->stackEnd + stackSize;
     return context;
 }
 
@@ -153,6 +205,7 @@ void Destroy(Handle handle)
     // resumed and its stack is collected. Exited: its stack is already gone. Only the running
     // context could still use the record, and it never destroys itself.
     mkw_host_context_js_forget(context);
+    std::free(context->stackAllocation);
     delete context;
 }
 
@@ -169,7 +222,10 @@ void Switch(Handle target)
         return;
     }
     destination->started = true;
+    source->savedStackPointer = emscripten_stack_get_current();
     mkw_host_context_js_switch(source, destination);
+    // Resumed: whichever context ran last left its stack pointer behind.
+    UseStack(source, source->savedStackPointer);
     g_current = source;
 }
 
