@@ -9,13 +9,19 @@
 // x18 register, which libco's AArch64 backend does not save. Its handles are
 // only valid on the thread that initialized the scheduler.
 //
-// The web build has no stack switching at all (Asyncify would instrument nearly
-// every translated function), so there each context is a real host thread and
-// Switch() hands a single baton between them: exactly one context runs at a
-// time and only at Switch() calls, which keeps the cooperative semantics. Any
-// host can opt into that backend with MKW_HOST_CONTEXT_THREADS, which is how it
-// is tested natively. See guest_domain_local.h for the state this affects.
-#if defined(__wasm__) && !defined(MKW_HOST_CONTEXT_THREADS)
+// Wasm has no native stack switching (Asyncify would instrument nearly every
+// translated function). Two backends cover it:
+// - MKW_HOST_CONTEXT_JSPI (the web default): each context is its own suspendable
+//   stack via JavaScript Promise Integration, all on one JS thread. That keeps
+//   every guest thread on the thread that owns WebGPU and the canvas, and a
+//   destroyed context's suspended stack is simply garbage-collected. Chromium.
+// - MKW_HOST_CONTEXT_THREADS: each context is a real host thread and Switch()
+//   hands a single baton between them, so exactly one runs at a time and only
+//   at Switch() calls. Works wherever pthreads do; any host can opt in, which is
+//   how it is tested natively. See guest_domain_local.h for the state it affects.
+#if defined(__EMSCRIPTEN__) && !defined(MKW_HOST_CONTEXT_THREADS) && !defined(MKW_HOST_CONTEXT_JSPI)
+#define MKW_HOST_CONTEXT_JSPI 1
+#elif defined(__wasm__) && !defined(__EMSCRIPTEN__) && !defined(MKW_HOST_CONTEXT_THREADS)
 #define MKW_HOST_CONTEXT_THREADS 1
 #endif
 

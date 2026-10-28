@@ -93,14 +93,15 @@ translated call stacks (`OSSleepThread`, `OSYieldThread`, and so on).
 | Option | Verdict |
 | --- | --- |
 | Asyncify (`emscripten_fiber_t`) | Reject. Almost every translated function can reach a yield through an indirect call, so Asyncify would instrument nearly the whole program: a large size and speed cost. |
-| JSPI | Viable later. Each guest thread becomes a suspended `WebAssembly.promising` stack that a scheduler resumes. Chromium only today, and each switch goes through the microtask queue. |
-| One pthread per guest thread, with a baton | **Baseline.** Each guest thread is a real pthread (a Web Worker) that sleeps on its own semaphore. The scheduler hands one baton around, so exactly one runs at a time, which keeps cooperative semantics exact. Works anywhere SharedArrayBuffer does. |
+| JSPI | **Default (`MKW_HOST_CONTEXT_JSPI`).** Each guest thread is its own `WebAssembly.promising` stack, all on one JS thread; a switch parks the caller on a promise and resumes the target from a microtask. Chromium only, which the first release targets anyway. |
+| One pthread per guest thread, with a baton | **Alternative (`MKW_HOST_CONTEXT_THREADS`).** Each guest thread is a real pthread (a Web Worker) that sleeps on its own futex, and one baton is handed around, so exactly one runs at a time. Works anywhere SharedArrayBuffer does, but guest threads then span several JS threads, which WebGPU does not allow (section 4). |
 | Wasm stack switching proposal | Not shipped. Revisit when it is. |
 
-**Plan (code done, see Progress).** The baton backend lives in `host_context.cpp` behind
-`MKW_HOST_CONTEXT_THREADS`, so it can be tested natively. The web build still has to prespawn the
-pthread pool (`PTHREAD_POOL_SIZE`), because creating a worker needs the browser main thread to
-return to its event loop.
+**Plan (code done, see Progress).** Both backends live in `host_context.cpp`. JSPI is the web
+default because it keeps every guest thread on the JS thread that owns WebGPU and the canvas, it
+is faster under contention (Progress), and a destroyed context's parked stack is simply
+garbage-collected. The rest of this list applies to the thread backend, which also runs natively
+(`MKW_HOST_CONTEXT_THREADS`) and needs a prespawned pthread pool (`PTHREAD_POOL_SIZE`) on the web.
 - **Thread-local state.** Every fiber used to share one host thread's TLS. Of the `thread_local`
   variables in the runtime, most are caches, log de-duplication or worker-thread flags, which are
   fine per thread. The guest-scoped ones (the fiber `CpuContext` handoff, the alarm and NAND
@@ -113,7 +114,7 @@ return to its event loop.
   parked mid-stack (for example cancelled, or exiting via `OSExitThread`) cannot be unwound, so its
   thread stays parked: one idle worker each. How often MKW does that still needs measuring.
 - **Switch cost.** See Progress. Measure switches per frame with the existing perf stats in the
-  browser; JSPI is the fallback if this is too slow.
+  browser.
 
 ### 3. Host threads and the browser event loop — M
 
@@ -124,12 +125,20 @@ dedicated host threads for the GX worker (`hle/gx/gx_worker.cpp:356`), the AX mi
 retrace timer. aurora adds the DVD thread, the render worker, and a pipeline-compile thread pool
 (`lib/gfx/pipeline_cache.cpp:92`).
 
-**Plan.** Build with `-sPROXY_TO_PTHREAD`, so `main()` and everything it spawns run in workers
-and may block. The browser main thread only owns the DOM: the canvas (transferred as an
-`OffscreenCanvas`), input events, and audio. Use a fixed `INITIAL_MEMORY` sized for the guest
-regions plus aurora caches. Memory growth with shared memory works, but it is slow and
-invalidates JS views. Raise `STACK_SIZE` and `DEFAULT_PTHREAD_STACK_SIZE` well above Emscripten's
-64 KiB default.
+**Plan (revised for JSPI).** Guest code, aurora and WebGPU all run on the browser main thread,
+and `main()` runs under JSPI so it can suspend. Two consequences:
+- The main thread may never block. The places where the guest side waits (the scheduler idling
+  until the next VI retrace or alarm, aurora waiting on GPU work or a buffer map) must suspend
+  through JSPI and let the event loop run, which is also what presents each frame and delivers
+  `mapAsync` callbacks. Short mutex waits against worker threads are tolerable (Emscripten spins
+  on the main thread).
+- Host worker threads stay pthreads (AX mixer, VI timer, deferred networking) as long as they
+  never touch WebGPU or SDL. The runtime's GX worker and aurora's render worker and pipeline
+  pool do touch WebGPU, so on the web they run inline on the main thread instead.
+
+Use a fixed `INITIAL_MEMORY` sized for the guest regions plus aurora caches: memory growth with
+shared memory works, but it is slow and invalidates JS views. Raise `STACK_SIZE` well above
+Emscripten's 64 KiB default.
 
 ### 4. Graphics: aurora, Dawn, WebGPU — XL
 
@@ -154,17 +163,14 @@ dual-source blending as optional features with fallbacks (`texture_convert.cpp`
 **Plan.**
 - Build aurora against Dawn's `emdawnwebgpu` port. It keeps the `wgpu::` C++ API, so most
   renderer code compiles unchanged.
-- Make aurora's render worker the single **GPU thread**. It owns the `OffscreenCanvas` and runs a
-  non-blocking loop that returns to the event loop every frame.
-- Turn every WebGPU call made off that thread into a queued closure. `render_worker::QueueItem`
-  already carries a `std::function`. Where a caller needs the result right away, it blocks on a
-  future, which is allowed because callers are workers.
-- Replace pipeline-pool compilation with `CreateRenderPipelineAsync` on the GPU thread.
-- Replace `WaitAny` with callbacks.
+- Run everything WebGPU on the main thread (section 3): aurora's render worker and pipeline pool
+  run inline there. That removes the need to funnel calls between threads.
+- Replace timed `WaitAny` with a JSPI-suspending wait that yields to the event loop until the
+  future completes (emdawnwebgpu delivers callbacks from the event loop).
 - **Synchronous readbacks** (EFB peeks in `lib/gfx/color_peek.cpp` and `depth_peek.cpp`, the
-  deferred-read materialization, `readback/gpu.cpp`): the guest thread blocks on a futex while
-  the GPU thread maps the buffer and yields. Expect up to a frame of extra latency, and check that
-  this doesn't change game-visible results.
+  deferred-read materialization, `readback/gpu.cpp`): the guest stack suspends via JSPI until the
+  map completes. Expect up to a frame of extra latency, and check that this doesn't change
+  game-visible results.
 - Compile out on web: Dawn toggles, shared texture memory, MetalFX, timestamp queries, and the
   on-disk pipeline cache (or move it to OPFS).
 - These changes belong in `patchzyy/aurora-wiicompiled` behind a `__EMSCRIPTEN__` or
@@ -385,9 +391,14 @@ Each phase ends with something testable and adds a CI job, so it doesn't regress
 
 ### Measured
 
-- Thread-backed switch cost (`host_context_stress_tests`, 4-core x86-64 Linux, native pthreads):
-  about 0.4 µs for a scheduler ping-pong and 0.5 µs with two workers, but 14–19 µs once there
-  are more runnable contexts than cores. libco: about 20 ns. Browser numbers are still needed.
+- Switch cost (`host_context_stress_tests`, 4-core x86-64 Linux):
+  - libco (native Linux): about 20 ns.
+  - Thread backend, native pthreads: about 0.4 µs ping-pong and 0.5 µs with two workers, but
+    14–19 µs once there are more runnable contexts than cores.
+  - Thread backend, Emscripten under Node: about 0.6 µs ping-pong, 1 µs with two workers, 6 µs
+    with four (after replacing libc++'s polling `atomic::wait` with a real futex; it was 526 µs).
+  - JSPI backend, Emscripten under Node 24: 0.6–1 µs at every worker count.
+  - Browser numbers are still needed.
 
 ### Found along the way
 

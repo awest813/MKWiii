@@ -1,6 +1,10 @@
 #include "host_context.h"
 
-#if defined(MKW_HOST_CONTEXT_THREADS)
+#if defined(MKW_HOST_CONTEXT_JSPI)
+#include <emscripten.h>
+
+#include <cstdlib>
+#elif defined(MKW_HOST_CONTEXT_THREADS)
 #include <pthread.h>
 
 #include <atomic>
@@ -36,7 +40,146 @@ extern "C" void* mkw_co_init(void* stackTop, void (*entry)(void*), void* argumen
 
 namespace HostContext {
 
-#if defined(MKW_HOST_CONTEXT_THREADS)
+#if defined(MKW_HOST_CONTEXT_JSPI)
+
+// Every context runs on this one JS thread. A context is a separate `WebAssembly.promising` call
+// into mkw_host_context_run; Switch() calls a suspending import that parks the caller on a promise
+// and queues the target, which starts (first time) or has its own parked promise resolved. Only
+// one context runs at a time and only Switch()/ExitTo() hand over, as with fibers. JSPI needs the
+// stack between the promising entry and the suspending import to be wasm only, which holds for
+// guest code: it is never entered from a JS callback.
+//
+// The runtime must be linked with -sJSPI -sJSPI_EXPORTS=mkw_host_context_run.
+namespace {
+struct Context {
+    Entry entry = nullptr;
+    void* argument = nullptr;
+    bool started = false;
+    Context* exitTarget = nullptr;
+};
+
+Context* g_current = nullptr;
+} // namespace
+
+EM_JS(void, mkw_host_context_js_init, (), {
+    // (No `??=` here: C++ would read it as a trigraph.)
+    if (Module.mkwHostContext) return;
+    Module.mkwHostContext = {
+        parked: new Map(),
+        // Resume a parked context, or start one that has never run. Queued as a microtask so the
+        // caller finishes suspending (or returning) before the target touches anything.
+        schedule(target) {
+            queueMicrotask(() => {
+                const resume = this.parked.get(target);
+                if (resume) {
+                    this.parked.delete(target);
+                    resume();
+                    return;
+                }
+                wasmExports["mkw_host_context_run"](target).catch((error) => {
+                    // An exception escaping a context has no wasm caller left to catch it.
+                    console.error("HostContext: a context ended with an exception", error);
+                    throw error;
+                });
+            });
+        },
+    };
+});
+
+EM_JS(void, mkw_host_context_js_schedule, (void* target), {
+    Module.mkwHostContext.schedule(target);
+});
+
+EM_ASYNC_JS(void, mkw_host_context_js_switch, (void* source, void* target), {
+    const jspi = Module.mkwHostContext;
+    const parked = new Promise((resolve) => jspi.parked.set(source, resolve));
+    jspi.schedule(target);
+    await parked;
+});
+
+EM_JS(void, mkw_host_context_js_forget, (void* context), {
+    // Dropping the resolver lets the engine collect the parked stack.
+    Module.mkwHostContext?.parked.delete(context);
+});
+
+extern "C" EMSCRIPTEN_KEEPALIVE void mkw_host_context_run(void* argument)
+{
+    auto* context = static_cast<Context*>(argument);
+    g_current = context;
+    context->entry(context->argument);
+    if (!context->exitTarget) {
+        // A guest fiber must leave through ExitTo(), never by simply returning.
+        std::abort();
+    }
+    // This stack ends here; the target runs once it has.
+    mkw_host_context_js_schedule(context->exitTarget);
+}
+
+bool InitializeScheduler(Handle* scheduler)
+{
+    mkw_host_context_js_init();
+    auto* context = new Context();
+    context->started = true;
+    g_current = context;
+    *scheduler = context;
+    return true;
+}
+
+void ShutdownScheduler(Handle scheduler)
+{
+    auto* context = static_cast<Context*>(scheduler);
+    if (g_current == context) {
+        g_current = nullptr;
+    }
+    delete context;
+}
+
+Handle Create(std::size_t, Entry entry, void* argument)
+{
+    // The stack belongs to the engine (JSPI grows it as needed), so there is no size to apply.
+    auto* context = new Context();
+    context->entry = entry;
+    context->argument = argument;
+    return context;
+}
+
+void Destroy(Handle handle)
+{
+    auto* context = static_cast<Context*>(handle);
+    if (!context) {
+        return;
+    }
+    // Never started: nothing references it. Parked: forgetting its resolver means it is never
+    // resumed and its stack is collected. Exited: its stack is already gone. Only the running
+    // context could still use the record, and it never destroys itself.
+    mkw_host_context_js_forget(context);
+    delete context;
+}
+
+bool IsCurrent(Handle context)
+{
+    return context != nullptr && context == g_current;
+}
+
+void Switch(Handle target)
+{
+    auto* destination = static_cast<Context*>(target);
+    Context* source = g_current;
+    if (!destination || destination == source) {
+        return;
+    }
+    destination->started = true;
+    mkw_host_context_js_switch(source, destination);
+    g_current = source;
+}
+
+void ExitTo(Handle target)
+{
+    // mkw_host_context_run hands over once the entry function has returned.
+    g_current->exitTarget = static_cast<Context*>(target);
+}
+
+#elif defined(MKW_HOST_CONTEXT_THREADS)
 
 namespace {
 // Contexts are never freed: a context's thread can still be inside notify_one() on another

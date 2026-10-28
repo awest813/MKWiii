@@ -4,10 +4,10 @@ get_filename_component(MKW_TEST_RUNTIME_DIR "${CMAKE_CURRENT_LIST_DIR}/.." ABSOL
 # project's host-platform contracts, not Aurora's third-party test suite.
 enable_testing()
 if(MKW_PLATFORM_WEB)
-    # Tests run under Node (CMAKE_CROSSCOMPILING_EMULATOR, set by emcmake): real host files,
-    # main() on a pthread so it may block, and workers created up front because Node only starts
-    # one when the main thread returns to its event loop.
-    add_link_options(-sNODERAWFS=1 -sEXIT_RUNTIME=1 -sPROXY_TO_PTHREAD=1 -sPTHREAD_POOL_SIZE=24
+    # Tests run under Node (CMAKE_CROSSCOMPILING_EMULATOR, set by emcmake) with real host files,
+    # and with workers created up front because Node only starts one when the main thread returns
+    # to its event loop. (Node's main thread may block, unlike a browser's.)
+    add_link_options(-sNODERAWFS=1 -sEXIT_RUNTIME=1 -sPTHREAD_POOL_SIZE=24
                      -sINITIAL_MEMORY=256MB -sSTACK_SIZE=1MB)
 endif()
 if(MKW_BUILD_PSQ_TESTS)
@@ -84,16 +84,33 @@ add_test(NAME mkw_bluetooth_controller_tests COMMAND mkw_bluetooth_controller_te
 # of fiber_manager.cpp. Exercise the Linux libco handoff directly so future
 # refactors cannot silently remove its headers, implementation, or link edge.
 if(MKW_PLATFORM_WEB)
-    # The thread-backed HostContext is the web build's only backend (see host_context.h).
+    # Both web HostContext backends (see host_context.h): JSPI, the default, and the thread one.
     foreach(test IN ITEMS host_context host_context_stress)
-        add_executable(mkw_web_${test}_tests
-            "${MKW_TEST_RUNTIME_DIR}/tests/${test}_tests.cpp"
-            "${MKW_TEST_RUNTIME_DIR}/src/host_context.cpp")
-        target_include_directories(mkw_web_${test}_tests PRIVATE "${MKW_TEST_RUNTIME_DIR}/include")
-        target_compile_features(mkw_web_${test}_tests PRIVATE cxx_std_20)
+        foreach(backend IN ITEMS jspi threads)
+            set(target mkw_web_${backend}_${test}_tests)
+            add_executable(${target}
+                "${MKW_TEST_RUNTIME_DIR}/tests/${test}_tests.cpp"
+                "${MKW_TEST_RUNTIME_DIR}/src/host_context.cpp")
+            target_include_directories(${target} PRIVATE "${MKW_TEST_RUNTIME_DIR}/include")
+            target_compile_features(${target} PRIVATE cxx_std_20)
+        endforeach()
+        target_link_options(mkw_web_jspi_${test}_tests PRIVATE
+            -sJSPI -sJSPI_EXPORTS=mkw_host_context_run)
+        target_compile_definitions(mkw_web_threads_${test}_tests PRIVATE MKW_HOST_CONTEXT_THREADS=1)
     endforeach()
-    add_test(NAME mkw_web_host_context_tests COMMAND mkw_web_host_context_tests)
-    add_test(NAME mkw_web_host_context_stress_tests COMMAND mkw_web_host_context_stress_tests 2)
+    # Node only exposes JSPI behind a flag; give the emulator command explicitly so it can pass it.
+    foreach(backend IN ITEMS jspi threads)
+        set(node_flags "")
+        if(backend STREQUAL "jspi")
+            set(node_flags --experimental-wasm-jspi)
+        endif()
+        add_test(NAME mkw_web_${backend}_host_context_tests
+            COMMAND ${CMAKE_CROSSCOMPILING_EMULATOR} ${node_flags}
+                    $<TARGET_FILE:mkw_web_${backend}_host_context_tests>)
+        add_test(NAME mkw_web_${backend}_host_context_stress_tests
+            COMMAND ${CMAKE_CROSSCOMPILING_EMULATOR} ${node_flags}
+                    $<TARGET_FILE:mkw_web_${backend}_host_context_stress_tests> 2)
+    endforeach()
 endif()
 
 if(MKW_PLATFORM_LINUX)
