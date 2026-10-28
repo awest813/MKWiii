@@ -39,8 +39,10 @@ struct Header {
     uint32_t size;
     uint32_t reserved;
 };
+// Each record reserves a fixed 16-byte header slot so the payload after it stays aligned. The
+// header itself is 16 bytes with 64-bit pointers and 12 on wasm32; it only has to fit.
 constexpr size_t kHeaderSize = 16;
-static_assert(sizeof(Header) == kHeaderSize);
+static_assert(sizeof(Header) <= kHeaderSize && alignof(Header) <= kHeaderSize);
 
 constexpr size_t kCapacity = size_t{8} << 20;
 // How long the worker keeps polling before it sleeps; recording arrives in bursts and each wake-up

@@ -9,6 +9,7 @@
 #include <mbedtls/net_sockets.h>
 #include <mbedtls/ssl.h>
 #include <mbedtls/x509_crt.h>
+#include <sys/time.h>  // struct timeval for SO_RCVTIMEO/SO_SNDTIMEO
 
 #include <chrono>
 #include <cstring>

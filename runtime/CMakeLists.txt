@@ -357,12 +357,15 @@ endif()
 # failure mode is worth far more than the milliseconds.
 file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS "src/*.cpp")
 if(NOT MKW_PLATFORM_WEB)
-    list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_LIST_DIR}/src/guest_flat_memory_web.cpp")
+    list(REMOVE_ITEM SOURCES
+        "${CMAKE_CURRENT_LIST_DIR}/src/guest_flat_memory_web.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/src/discord_presence_web.cpp")
 endif()
 if(MKW_PLATFORM_WEB)
     list(REMOVE_ITEM SOURCES
         "${CMAKE_CURRENT_LIST_DIR}/src/guest_flat_memory.cpp"
-        "${CMAKE_CURRENT_LIST_DIR}/src/guest_flat_memory_macos.cpp")
+        "${CMAKE_CURRENT_LIST_DIR}/src/guest_flat_memory_macos.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/src/discord_presence.cpp")
 elseif(MKW_PLATFORM_MACOS)
     list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_LIST_DIR}/src/guest_flat_memory.cpp")
     if(MKW_PLATFORM_MACOS_ARM64)
