@@ -1,6 +1,6 @@
 # Web port: audit and plan
 
-Status: proposal. Nothing here is implemented yet.
+Status: plan accepted; decisions recorded under [Decisions](#decisions). Nothing is implemented yet.
 
 This document audits what stands between the current native runtime and a build that runs in a
 browser (WebAssembly + WebGPU), and lays out a phased plan. File references are to this repo and
@@ -32,8 +32,8 @@ The translator emits portable C++ and sends every guest memory access through ru
 - **The accuracy bar is unchanged.** Ghost replays must stay in sync with Dolphin, Wii, and native
   WiiCompiled. That rules out any floating-point shortcut that changes results.
 - **Browser floor.** The plan needs WebGPU, wasm threads (SharedArrayBuffer, so the page must be
-  cross-origin isolated with COOP/COEP headers), wasm SIMD128, and wasm exception handling. In
-  practice that means current Chromium first, with Firefox and Safari as follow-ups.
+  cross-origin isolated with COOP/COEP headers), wasm SIMD128, and wasm exception handling. The
+  first release targets current Chromium only; Firefox and Safari are follow-ups.
 
 ## Audit by subsystem
 
@@ -295,14 +295,14 @@ reachable, including UDP peer-to-peer, with no change to the HLE layer.
 
 ## Distribution models (maintainer decision needed)
 
-**A. Local web build (recommended first).** Setup gains a `--target web` mode. It runs the same
+**A. Local web build (chosen for the first release).** Setup gains a `--target web` mode. It runs the same
 translation, compiles with Emscripten instead of Clang, and produces a static folder
 (`index.html`, `.js`, `.wasm`). Setup then serves it on `localhost` with COOP/COEP headers, plus
 the optional socket bridge. The legal posture is identical to native, and the existing Setup and
 Wheel Wizard flow extends naturally. The benefit is the browser sandbox and portability (for
 example, ChromeOS or locked-down machines), not zero-install.
 
-**B. In-browser build (stretch, needs a feasibility spike).** A hosted page ships only the runtime
+**B. In-browser build (chosen as a later spike, after A ships).** A hosted page ships only the runtime
 and the toolchain: the translator (.NET on wasm), plus `clang` and `wasm-ld` compiled to wasm.
 The user drops in their disc and everything is translated and compiled in browser workers, then
 cached in OPFS. Nothing derived from the game leaves the user's machine. The risk is compile time
@@ -324,10 +324,11 @@ Each phase ends with something testable and adds a CI job, so it doesn't regress
 | 2. Memory model | Wasm checked fast path, `guest_flat_memory_web.cpp`, fix the unmapped-access parity gap, move `FlatWriteRam*` and PSQ off the flat base. | Synthetic-DOL recompilation test (`Launcher/Test-Recompilation.ps1` equivalent) runs headless (`--headless`) under Node. |
 | 3. Guest threads | `host_context_web.cpp` (baton), `thread_local` classification, pthread pool. | `host_context_tests` plus a multi-thread synthetic DOL pass under Node, with switch-cost numbers recorded. |
 | 4. aurora on the web | `emdawnwebgpu`, GPU-thread funnel, async pipelines, callback-based waits, readbacks, SDL3 Emscripten window, input, and audio. | aurora examples, then the synthetic DOL, render in Chromium. |
-| 5. Boot the game | OPFS storage, disc import, `Config.toml` and NAND persistence, log download, fatal overlay. | Local build of PAL `RMCP01` reaches the title screen in Chromium. |
-| 6. Parity and performance | Ghost-replay sync check against native, audio, input, F10 overlay, profiling (memory path, NI flushing, byte swaps, readback latency). | Ghost replays stay in sync. Full speed on the README's minimum hardware in Chromium. |
-| 7. Packaging | Setup `--target web`, localhost server with COOP/COEP, Wheel Wizard hook, docs. | One command produces and launches a web build. |
-| 8. Optional | Online play via the socket bridge, WebHID Wii Remotes, WebUSB GC adapter, Firefox and Safari, JSPI fibers, option B spike, Retro Rewind web profile. | Per item. |
+| 5. Boot the game | OPFS storage, disc import, `Config.toml` and NAND persistence, log download, fatal overlay. Retro Rewind static profile built and imported (`RetroRewind6` folder into OPFS) alongside the base game. | Local builds of PAL `RMCP01` and Retro Rewind both reach the title screen in Chromium. |
+| 6. Parity and performance | Ghost-replay sync check against native for both profiles, audio, input, F10 overlay, profiling (memory path, NI flushing, byte swaps, readback latency). | Ghost replays stay in sync for both profiles. Full speed on the README's minimum hardware in Chromium. |
+| 7. Packaging | Setup `--target web` for both the base game and Retro Rewind, localhost server with COOP/COEP, Wheel Wizard hook, docs. | One command produces and launches a web build of either profile. |
+| 8. Option B spike | Translator on .NET wasm, `clang`/`wasm-ld` in browser workers, sharded compile into OPFS. | Written go/no-go with measured compile time and peak memory for a full build. |
+| 9. Optional | Online play via the socket bridge, WebHID Wii Remotes, WebUSB GC adapter, Firefox and Safari, JSPI fibers. | Per item. |
 
 ## Top risks
 
@@ -343,10 +344,13 @@ Each phase ends with something testable and adds a CI job, so it doesn't regress
 5. **Distribution.** Option A gives a sandboxed local build, not a "visit a URL and play" port.
    Option B is the only route to that without hosting game-derived code, and it is unproven.
 
-## Open questions
+## Decisions
 
-- Which distribution model should we target: A only, or A now and a B spike later?
-- Is a Chromium-only first release acceptable?
-- Should Retro Rewind be in scope before base-game parity (Phase 6)?
-- Should the web-specific aurora changes live in the main fork behind a flag, or on a separate
-  branch?
+- **Distribution:** option A (local web build via Setup) for the first release, then an option B
+  (in-browser build) feasibility spike as Phase 8.
+- **Browsers:** Chromium-only for the first release.
+- **Retro Rewind:** in scope from Phase 5, before base-game parity is signed off; both profiles
+  share every exit criterion from then on.
+- **aurora:** web changes land in the main `patchzyy/aurora-wiicompiled` fork behind an
+  `AURORA_WEB` / `__EMSCRIPTEN__` switch, not on a long-lived branch, so native and web stay on
+  one renderer. Native performance must not regress from these changes.
