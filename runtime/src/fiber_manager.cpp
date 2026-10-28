@@ -539,17 +539,22 @@ void GuestFiberManager::FiberProc(void* param)
     uint32_t entryPoint = 0;
     uint32_t entryArg = 0;
     
+    bool found = false;
     {
         std::lock_guard<std::mutex> lock(s_mutex);
         auto it = s_fibers.find(guestThreadAddr);
-        if (it == s_fibers.end()) {
-            RT_LOG(RT_TAG_OS) << "FiberProc: fiber not found!" << std::endl;
-            HostContext::Switch(s_schedulerFiber);
-            return;
+        if (it != s_fibers.end()) {
+            found = true;
+            fiber = &it->second;
+            entryPoint = fiber->entryPoint;
+            entryArg = fiber->entryArg;
         }
-        fiber = &it->second;
-        entryPoint = fiber->entryPoint;
-        entryArg = fiber->entryArg;
+    }
+    if (!found) {
+        // Outside the lock: a context that never resumes must not leave s_mutex held.
+        RT_LOG(RT_TAG_OS) << "FiberProc: fiber not found!" << std::endl;
+        HostContext::ExitTo(s_schedulerFiber);
+        return;
     }
     
     // Get the CPU context
@@ -667,8 +672,8 @@ void GuestFiberManager::FiberProc(void* param)
         s_currentGuestThread = 0;
     }
     
-    // Return to scheduler
-    HostContext::Switch(s_schedulerFiber);
+    // Return to scheduler for good (see HostContext::ExitTo).
+    HostContext::ExitTo(s_schedulerFiber);
 }
 
 } // namespace Fiber

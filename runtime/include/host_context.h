@@ -32,4 +32,11 @@ void Destroy(Handle context);
 bool IsCurrent(Handle context);
 void Switch(Handle target);
 
+// Ends the calling (non-scheduler) context: `target` runs next and the caller is never resumed.
+// The caller's entry function must return immediately after this call. On fiber backends this
+// is Switch(target), which never returns, and a later Destroy() frees the abandoned stack. The
+// thread backend returns instead, so the entry function unwinds normally and the context's
+// thread hands over to `target` and exits once it has.
+void ExitTo(Handle target);
+
 } // namespace HostContext

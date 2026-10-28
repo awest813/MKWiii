@@ -1,8 +1,10 @@
 // Round-robin stress test for a HostContext backend: several contexts take turns through the
 // scheduler for many rounds. Checks that exactly one context ever runs at a time, that every
 // Switch() resumes the context it targeted at its own continuation point, that plain (non-atomic)
-// state written by one context is visible to the next, and that destroying contexts - both ones
-// that never ran and ones parked mid-run - leaves the others working. Prints the mean cost of one
+// state written by one context is visible to the next, that contexts leaving through ExitTo()
+// hand over correctly, and that destroying contexts - ones that never ran, ones that exited and
+// ones parked mid-run - leaves the others working. With the thread backend on Linux it also checks
+// that the threads of never-run and exited contexts really end. Prints the mean cost of one
 // Switch() so backends can be compared.
 #include "host_context.h"
 
@@ -10,6 +12,11 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <thread>
+
+#if defined(MKW_HOST_CONTEXT_THREADS) && defined(__linux__)
+#include <dirent.h>
+#endif
 
 namespace {
 // Worker count is argv[1] (default 8); 1 measures a plain scheduler ping-pong.
@@ -28,6 +35,44 @@ void Fail(const char* what)
 {
     std::fprintf(stderr, "host_context_stress_tests: %s\n", what);
     std::abort();
+}
+
+#if defined(MKW_HOST_CONTEXT_THREADS) && defined(__linux__)
+int CountThreads()
+{
+    int count = 0;
+    if (DIR* tasks = opendir("/proc/self/task")) {
+        while (const dirent* entry = readdir(tasks)) {
+            if (entry->d_name[0] != '.') ++count;
+        }
+        closedir(tasks);
+    }
+    return count;
+}
+
+// Threads exit asynchronously after handing over, so give them a moment.
+void ExpectThreadCount(int expected, const char* what)
+{
+    for (int attempt = 0; attempt < 1000 && CountThreads() != expected; ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    if (CountThreads() != expected) Fail(what);
+}
+#endif
+
+constexpr int kExitingRounds = 3;
+HostContext::Handle g_exiting = nullptr;
+int g_exitingRounds = 0;
+
+// Runs a few rounds, then leaves for good the way FiberProc does.
+void ExitingWorker(void*)
+{
+    for (int round = 0; round < kExitingRounds; ++round) {
+        if (!HostContext::IsCurrent(g_exiting)) Fail("exiting worker lost its identity");
+        ++g_exitingRounds;
+        if (round + 1 < kExitingRounds) HostContext::Switch(g_scheduler);
+    }
+    HostContext::ExitTo(g_scheduler);
 }
 
 void Worker(void* argument)
@@ -55,15 +100,36 @@ int main(int argc, char** argv)
     if (!HostContext::InitializeScheduler(&g_scheduler) || !HostContext::IsCurrent(g_scheduler)) {
         Fail("scheduler initialization");
     }
+#if defined(MKW_HOST_CONTEXT_THREADS) && defined(__linux__)
+    // Sanitizer runtimes start helper threads on first thread creation; let that happen first.
+    std::thread([] {}).join();
+    const int baseThreads = CountThreads();
+#endif
+
+    // A context that leaves through ExitTo() hands back to the scheduler for good.
+    g_exiting = HostContext::Create(64 * 1024, ExitingWorker, nullptr);
+    if (!g_exiting) Fail("Create (exiting)");
+    for (int round = 0; round < kExitingRounds; ++round) {
+        HostContext::Switch(g_exiting);
+        if (!HostContext::IsCurrent(g_scheduler)) Fail("ExitTo did not return to the scheduler");
+    }
+    if (g_exitingRounds != kExitingRounds) Fail("exiting worker ran the wrong number of rounds");
+    HostContext::Destroy(g_exiting);
+
+    // A context destroyed before it ever runs must not disturb anything.
+    for (int i = 0; i < 16; ++i) {
+        HostContext::Handle neverRun = HostContext::Create(64 * 1024, Worker, nullptr);
+        if (!neverRun) Fail("Create (never run)");
+        HostContext::Destroy(neverRun);
+    }
+#if defined(MKW_HOST_CONTEXT_THREADS) && defined(__linux__)
+    ExpectThreadCount(baseThreads, "threads of exited or never-run contexts did not end");
+#endif
     for (int i = 0; i < g_workerCount; ++i) {
         g_workers[i] = HostContext::Create(256 * 1024, Worker, reinterpret_cast<void*>(static_cast<intptr_t>(i)));
         if (!g_workers[i]) Fail("Create");
     }
 
-    // A context destroyed before it ever runs must not disturb anything.
-    HostContext::Handle neverRun = HostContext::Create(64 * 1024, Worker, nullptr);
-    if (!neverRun) Fail("Create (never run)");
-    HostContext::Destroy(neverRun);
 
     const auto start = std::chrono::steady_clock::now();
     long switches = 0;

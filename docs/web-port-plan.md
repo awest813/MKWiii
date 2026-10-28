@@ -107,9 +107,11 @@ return to its event loop.
   recursion guards, the audio poll cursor, the GX begin/timing flags) now use
   `MKW_GUEST_DOMAIN_LOCAL`. The host FP mode that mirrors FPSCR[NI] is per thread, so a new guest
   thread applies its own on entry.
-- **Destroyed contexts.** Native backends free a parked context's stack without unwinding it. A
-  thread cannot do that, so a guest thread destroyed after it has run stays parked forever (one
-  idle worker each). How often MKW destroys threads at runtime still needs measuring.
+- **Ending contexts.** A guest thread whose entry function returns leaves through
+  `HostContext::ExitTo()`, so its host thread hands over and exits; contexts destroyed before
+  they ever ran exit too (the stress test checks both on Linux). A guest thread destroyed while
+  parked mid-stack (for example cancelled, or exiting via `OSExitThread`) cannot be unwound, so its
+  thread stays parked: one idle worker each. How often MKW does that still needs measuring.
 - **Switch cost.** See Progress. Measure switches per frame with the existing perf stats in the
   browser; JSPI is the fallback if this is too slow.
 
@@ -223,7 +225,10 @@ I found no assumption that pointers are 64-bit.
   whatever the host does: `INT_MIN` on x86. Wasm's saturating conversions (on by default in newer
   LLVM, so in current Emscripten) give `0`/`INT_MAX` instead. Web builds must compile with
   `-mno-nontrapping-fptoint`; `runtime/CMakeLists.txt` sets it for `MKW_PLATFORM_WEB`, and the
-  ISA differential's `cast_to_int` digest fails if it is lost.
+  ISA differential's `cast_to_int` digest fails if it is lost. The flag does not cover casts to
+  *unsigned* types: `static_cast<uint32_t>(-1.0f)` is `0xFFFFFFFF` on x86 but `0` on wasm (and
+  on AArch64). Runtime and HLE code casting possibly-negative floats to unsigned types needs an
+  audit (translated code goes through the explicit fctiw/fctiwz helpers).
 - **Build graph.** `emit-build-shards` and `runtime/CMakeLists.txt` hard-code x86 `-march`
   profiles, and Windows uses `__regcall` (`ppc_isa_config.h`). The web build needs an Emscripten
   toolchain file and per-target flags.

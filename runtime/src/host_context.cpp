@@ -33,14 +33,19 @@ namespace HostContext {
 #if defined(MKW_HOST_CONTEXT_THREADS)
 
 namespace {
+// Contexts are never freed: a context's thread can still be inside notify_one() on another
+// context when that one is destroyed, and a Context is a few dozen bytes. Threads, which are what
+// actually cost (one Web Worker and its stack each on the web), do exit where they can.
 struct Context {
     Entry entry = nullptr;
     void* argument = nullptr;
     // The baton. A thread waits for its own flag to become true; whoever sets it hands over
     // all memory the previous holder wrote (release/acquire).
     std::atomic<bool> running{false};
-    std::atomic<bool> abandoned{false};  // destroyed before it ever ran
-    bool started = false;                // only touched by the context's own thread and Destroy
+    // Fields below are only written by the baton holder, so the baton orders them.
+    bool started = false;      // has been handed the baton at least once
+    bool abandoned = false;    // destroyed before it ever ran: its thread exits instead
+    Context* exitTarget = nullptr;  // set by ExitTo(): hand over to this, then exit
 };
 
 thread_local Context* t_self = nullptr;
@@ -65,22 +70,30 @@ void WaitForBaton(Context* context)
     }
 }
 
+void HandOver(Context* source, Context* destination)
+{
+    destination->started = true;
+    source->running.store(false, std::memory_order_relaxed);
+    destination->running.store(true, std::memory_order_release);
+    destination->running.notify_one();
+}
+
 void* ThreadMain(void* argument)
 {
     auto* context = static_cast<Context*>(argument);
     t_self = context;
-    while (!context->running.load(std::memory_order_acquire)) {
-        if (context->abandoned.load(std::memory_order_acquire)) {
-            // Destroyed before its first Switch(): nothing references it any more.
-            delete context;
-            return nullptr;
-        }
-        context->running.wait(false, std::memory_order_acquire);
+    WaitForBaton(context);
+    if (context->abandoned) {
+        // Destroy() handed over only so this thread could exit; the baton is not really ours.
+        return nullptr;
     }
     context->entry(context->argument);
-
-    // A guest fiber must return through FiberProc's scheduler handoff, never off the end.
-    std::abort();
+    if (!context->exitTarget) {
+        // A guest fiber must leave through ExitTo(), never by simply returning.
+        std::abort();
+    }
+    HandOver(context, context->exitTarget);
+    return nullptr;
 }
 } // namespace
 
@@ -96,11 +109,9 @@ bool InitializeScheduler(Handle* scheduler)
 
 void ShutdownScheduler(Handle scheduler)
 {
-    auto* context = static_cast<Context*>(scheduler);
-    if (t_self == context) {
+    if (t_self == static_cast<Context*>(scheduler)) {
         t_self = nullptr;
     }
-    delete context;
 }
 
 Handle Create(std::size_t stackSize, Entry entry, void* argument)
@@ -129,19 +140,21 @@ Handle Create(std::size_t stackSize, Entry entry, void* argument)
 void Destroy(Handle handle)
 {
     auto* context = static_cast<Context*>(handle);
-    if (!context) {
+    if (!context || context->abandoned) {
         return;
     }
-    // Only the baton holder calls Destroy, and a context only starts once it has been handed the
-    // baton, so `started` is stable here. Switch() sets it on the destination before the handoff.
     if (!context->started) {
-        context->abandoned.store(true, std::memory_order_release);
+        // Wake it with `running` set (atomic::wait only returns on a value change); it sees
+        // `abandoned` and exits without touching anything else.
+        context->abandoned = true;
+        context->started = true;
+        context->running.store(true, std::memory_order_release);
         context->running.notify_one();
         return;
     }
-    // A context that has run is parked inside Switch() on a stack that native backends simply
-    // free. A thread's stack cannot be dropped without unwinding it, so the thread stays parked
-    // (it never gets the baton again) and its Context stays allocated for it.
+    // A context that left through ExitTo() has handed over and its thread is exiting on its own.
+    // One parked inside Switch() would need its stack unwound to exit, which native backends never
+    // do (they free the stack as is), so its thread stays parked and is never handed the baton.
 }
 
 bool IsCurrent(Handle context)
@@ -157,11 +170,15 @@ void Switch(Handle target)
         return;
     }
 
-    destination->started = true;
-    source->running.store(false, std::memory_order_relaxed);
-    destination->running.store(true, std::memory_order_release);
-    destination->running.notify_one();
+    HandOver(source, destination);
     WaitForBaton(source);
+}
+
+void ExitTo(Handle target)
+{
+    // ThreadMain hands over once the entry function has returned and its frames are gone, so
+    // nothing of the exiting context runs concurrently with `target`.
+    t_self->exitTarget = static_cast<Context*>(target);
 }
 
 #elif defined(_WIN32)
@@ -209,6 +226,11 @@ bool IsCurrent(Handle context)
 void Switch(Handle target)
 {
     SwitchToFiber(target);
+}
+
+void ExitTo(Handle target)
+{
+    Switch(target);
 }
 
 #elif defined(__APPLE__) && defined(__aarch64__)
@@ -295,6 +317,11 @@ void Switch(Handle target)
     g_current = destination;
     mkw_co_switch(&destination->savedStackPointer, &source->savedStackPointer);
     g_current = source;
+}
+
+void ExitTo(Handle target)
+{
+    Switch(target);
 }
 
 #elif defined(__linux__) || (defined(__APPLE__) && defined(__x86_64__))
@@ -402,6 +429,11 @@ void Switch(Handle target)
     g_current = destination;
     co_switch(destination->native);
     g_current = source;
+}
+
+void ExitTo(Handle target)
+{
+    Switch(target);
 }
 
 #endif
