@@ -1,6 +1,7 @@
 # Web port: audit and plan
 
-Status: plan accepted; decisions recorded under [Decisions](#decisions). Nothing is implemented yet.
+Status: plan accepted; decisions recorded under [Decisions](#decisions). Progress is tracked under
+[Progress](#progress).
 
 This document audits what stands between the current native runtime and a build that runs in a
 browser (WebAssembly + WebGPU), and lays out a phased plan. File references are to this repo and
@@ -343,6 +344,65 @@ Each phase ends with something testable and adds a CI job, so it doesn't regress
 4. **Host stack limits** for deep guest call chains in V8 workers.
 5. **Distribution.** Option A gives a sandboxed local build, not a "visit a URL and play" port.
    Option B is the only route to that without hosting game-derived code, and it is unproven.
+
+## Progress
+
+### Done
+
+- **ISA layer (Phase 1).** `__wasm__` branches in `isa/ppc_isa_config.h`, `ppc_isa_fpenv.h`,
+  `ppc_isa_float.h` and `ppc_isa_quantized.h`. `runtime/tests/isa_differential_tests.cpp` hashes
+  every paired-single/FP/PSQ helper over 200k edge-biased inputs with FPSCR[NI] clear and set;
+  `runtime/web/isa-differential.sh` builds it natively and for wasm32-wasi (run under Node) and
+  diffs the digests. All 53 compared digests are identical. CI job: `web_isa` in `build.yml`.
+  - FPSCR[NI] on wasm: the pair primitives flush inputs (DAZ) and flush results with x86's
+    after-rounding tininess rule, which matches native bit for bit. Helpers built from scalar C++
+    (`ps_sum*`, `ps_sel`, `ps_res`, `ps_from_scalar`, the fused-single scalars, `fres`,
+    `frsqrte`) inherit the host's *global* DAZ/FTZ natively; on wasm they only match on
+    non-denormal operands. They are tagged `[host-daz]` and compared with NI clear only.
+    Whether this matters depends on where the game sets NI (THP decode is the known case).
+  - Fused multiply-add uses exact `std::fma` for now (wasm has no FMA instruction). The
+    relaxed-SIMD fast path and its startup fusion probe are still to do.
+- **Guest memory (Phase 2, code only).** No flat reservation on wasm; `RequiresCheckedAccess()`
+  is a compile-time `true`, `FlatWriteRam*` takes the checked path, and
+  `src/guest_flat_memory_web.cpp` backs regions with plain allocations.
+- **Guest threads (Phase 3, code only).** Thread-backed `HostContext` (`MKW_HOST_CONTEXT_THREADS`,
+  default on wasm) with an atomic baton, plus `MKW_GUEST_DOMAIN_LOCAL`
+  (`include/guest_domain_local.h`) for the guest-scoped state that relied on fibers sharing one
+  host thread's TLS. `host_context_tests` and the new `host_context_stress_tests` run against it
+  natively in the platform test suite.
+
+### Measured
+
+- Thread-backed switch cost (`host_context_stress_tests`, 4-core x86-64 Linux, native pthreads):
+  about 0.4 µs for a scheduler ping-pong and 0.5 µs with two workers, but 14–19 µs once there
+  are more runnable contexts than cores. libco: about 20 ns. Browser numbers are still needed.
+
+### Corrections to the audit above
+
+- `Memory::Read*`/`Write*` are already inline bias-table lookups (end of
+  `guest_abi/memory_access.h`), so checked mode costs one table load per access, not a call.
+  Only `ResolveRangeHost` returns null in checked mode, which sends range-lowered accesses
+  through the out-of-line `*ResolvedFallback` helpers: the first memory-path optimization to try.
+- The "unmapped access" difference between flat and checked hosts already exists on shipped
+  Apple Silicon builds, so it is not a web-specific blocker.
+
+### Found along the way
+
+- musl's `fma` (wasi-libc and Emscripten) returns `a*c + b` when `b` is zero, so a nonzero
+  product that underflows comes back as `+0` instead of `-0`. Guarded in `PpcFmaDoubleInline`.
+- Native x86-64-v2 builds (no FMA) flip the sign of a NaN subtractor in `ps_msub`/`ps_nmsub`
+  (`ffc00001` where v3 gives `7fc00001`): the scalar fallback negates the subtractor before
+  `std::fma`. Pre-existing and unrelated to the web port; not fixed here.
+- With two NaN operands, native x86 itself is not deterministic for commutative ops: clang may
+  swap `mulps`/`addps` operands, so which payload wins depends on inlining.
+
+### Next
+
+- Install Emscripten and build the platform tests, the ISA differential and the runtime for
+  `wasm32-unknown-emscripten` (this environment only had a WASI sysroot without threads,
+  exceptions or a filesystem).
+- Web platform layer: signal handlers, paths, Discord, music ducking and the CPU-baseline check.
+- Phase 0 spikes (b) and (c) in a real browser, then Phase 4 (aurora).
 
 ## Decisions
 
