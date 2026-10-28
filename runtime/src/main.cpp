@@ -1423,7 +1423,11 @@ int RuntimeMain(int argc, char** argv) {
             const char* configName;
             AuroraBackend backend;
         };
-#if defined(__APPLE__)
+#if defined(__EMSCRIPTEN__)
+        static constexpr std::array<GraphicsBackendEntry, 2> kGraphicsBackends{{
+            {"auto", BACKEND_AUTO}, {"webgpu", BACKEND_WEBGPU},
+        }};
+#elif defined(__APPLE__)
         static constexpr std::array<GraphicsBackendEntry, 2> kGraphicsBackends{{
             {"auto", BACKEND_AUTO}, {"metal", BACKEND_METAL},
         }};

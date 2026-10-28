@@ -71,7 +71,7 @@ jobs:
           ctest --test-dir build-platform --output-on-failure
 
   web_isa:
-    name: Web ISA (WASI and Emscripten vs native digests)
+    name: Web (ISA digests, Emscripten platform tests)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
@@ -96,6 +96,14 @@ jobs:
         run: |
           source "$RUNNER_TEMP/emsdk/emsdk_env.sh"
           runtime/web/isa-differential.sh
+
+      - name: Build and run host-platform tests under Emscripten (Node)
+        run: |
+          source "$RUNNER_TEMP/emsdk/emsdk_env.sh"
+          emcmake cmake -S runtime -B build-web -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DMKW_BUILD_PRODUCTS=OFF -DMKW_PLATFORM_TESTS_ONLY=ON
+          cmake --build build-web --parallel 3
+          ctest --test-dir build-web --output-on-failure
 
   macos_substrate:
     name: macOS arm64 (configure + substrate tests)

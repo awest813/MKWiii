@@ -21,7 +21,9 @@
 namespace RuntimePlatform {
 
 std::optional<std::filesystem::path> ExecutableDirectory() noexcept {
-#if defined(_WIN32)
+#if defined(__EMSCRIPTEN__)
+    return std::filesystem::path(kWebAppRoot);
+#elif defined(_WIN32)
     std::wstring buffer(MAX_PATH, L'\0');
     for (;;) {
         const DWORD length = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
@@ -65,7 +67,9 @@ std::optional<std::filesystem::path> ExecutableDirectory() noexcept {
 }
 
 std::filesystem::path ApplicationDataDirectory(std::string_view applicationName) {
-#if defined(_WIN32)
+#if defined(__EMSCRIPTEN__)
+    return std::filesystem::path(kWebUserDataRoot) / applicationName;
+#elif defined(_WIN32)
     PWSTR rawPath = nullptr;
     if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, KF_FLAG_CREATE, nullptr, &rawPath)) && rawPath) {
         const std::filesystem::path directory = std::filesystem::path(rawPath) / applicationName;

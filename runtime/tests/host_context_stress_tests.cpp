@@ -130,7 +130,6 @@ int main(int argc, char** argv)
         if (!g_workers[i]) Fail("Create");
     }
 
-
     const auto start = std::chrono::steady_clock::now();
     long switches = 0;
     for (int round = 0; round < kRounds; ++round) {

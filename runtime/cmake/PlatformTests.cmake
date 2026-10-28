@@ -3,6 +3,13 @@ get_filename_component(MKW_TEST_RUNTIME_DIR "${CMAKE_CURRENT_LIST_DIR}/.." ABSOL
 # Keep these independent from Aurora's BUILD_TESTING option: they validate the
 # project's host-platform contracts, not Aurora's third-party test suite.
 enable_testing()
+if(MKW_PLATFORM_WEB)
+    # Tests run under Node (CMAKE_CROSSCOMPILING_EMULATOR, set by emcmake): real host files,
+    # main() on a pthread so it may block, and workers created up front because Node only starts
+    # one when the main thread returns to its event loop.
+    add_link_options(-sNODERAWFS=1 -sEXIT_RUNTIME=1 -sPROXY_TO_PTHREAD=1 -sPTHREAD_POOL_SIZE=24
+                     -sINITIAL_MEMORY=256MB -sSTACK_SIZE=1MB)
+endif()
 if(MKW_BUILD_PSQ_TESTS)
     add_executable(mkw_psq_helpers_tests
         "${MKW_TEST_RUNTIME_DIR}/tests/psq_helpers_tests.cpp"
@@ -76,6 +83,19 @@ add_test(NAME mkw_bluetooth_controller_tests COMMAND mkw_bluetooth_controller_te
 # HostContext deliberately keeps the platform-specific context primitive out
 # of fiber_manager.cpp. Exercise the Linux libco handoff directly so future
 # refactors cannot silently remove its headers, implementation, or link edge.
+if(MKW_PLATFORM_WEB)
+    # The thread-backed HostContext is the web build's only backend (see host_context.h).
+    foreach(test IN ITEMS host_context host_context_stress)
+        add_executable(mkw_web_${test}_tests
+            "${MKW_TEST_RUNTIME_DIR}/tests/${test}_tests.cpp"
+            "${MKW_TEST_RUNTIME_DIR}/src/host_context.cpp")
+        target_include_directories(mkw_web_${test}_tests PRIVATE "${MKW_TEST_RUNTIME_DIR}/include")
+        target_compile_features(mkw_web_${test}_tests PRIVATE cxx_std_20)
+    endforeach()
+    add_test(NAME mkw_web_host_context_tests COMMAND mkw_web_host_context_tests)
+    add_test(NAME mkw_web_host_context_stress_tests COMMAND mkw_web_host_context_stress_tests 2)
+endif()
+
 if(MKW_PLATFORM_LINUX)
     add_executable(mkw_linux_host_context_tests
         "${MKW_TEST_RUNTIME_DIR}/tests/host_context_tests.cpp"

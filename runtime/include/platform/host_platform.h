@@ -11,6 +11,16 @@
 // prototypes establish a safe abstraction.
 namespace RuntimePlatform {
 
+#if defined(__EMSCRIPTEN__)
+// The web build runs on a virtual filesystem with a fixed layout instead of host paths: the page
+// mounts the runtime's assets and the imported game files under kWebAppRoot (what
+// ExecutableDirectory() reports, as the install directory does natively), and per-user state
+// (Config.toml, NAND saves, logs) under kWebUserDataRoot, which is backed by persistent browser
+// storage.
+inline constexpr const char* kWebAppRoot = "/wiicompiled";
+inline constexpr const char* kWebUserDataRoot = "/userdata";
+#endif
+
 std::optional<std::filesystem::path> ExecutableDirectory() noexcept;
 
 // Returns the platform's conventional per-user application-data directory.

@@ -10,8 +10,10 @@ if(NOT CMAKE_OSX_DEPLOYMENT_TARGET)
 endif()
 project(mkw_recompiled)
 
-if(NOT CMAKE_CXX_COMPILER_ID MATCHES "^(Clang|AppleClang)$" OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
-    message(FATAL_ERROR "WiiCompiled requires a 64-bit Clang toolchain")
+# The web build (Emscripten) is wasm32 by design: see guest_abi/flat_memory.h.
+if(NOT CMAKE_CXX_COMPILER_ID MATCHES "^(Clang|AppleClang)$" OR
+   (NOT CMAKE_SIZEOF_VOID_P EQUAL 8 AND NOT EMSCRIPTEN))
+    message(FATAL_ERROR "WiiCompiled requires a 64-bit Clang toolchain (or Emscripten)")
 endif()
 
 if(APPLE AND CMAKE_OSX_ARCHITECTURES)
@@ -42,8 +44,11 @@ elseif(EMSCRIPTEN)
     set(MKW_PLATFORM_WEB TRUE)
     # Required everywhere, translated code included: the ISA headers need SIMD128, and float->int
     # casts must keep x86's INT_MIN result for NaN/out-of-range values instead of saturating
-    # (runtime/tests/isa_differential_tests.cpp, cast_to_int).
-    add_compile_options(-msimd128 -mno-nontrapping-fptoint)
+    # (runtime/tests/isa_differential_tests.cpp, cast_to_int). The runtime relies on C++
+    # exceptions (native wasm exception handling) and on threads (the thread-backed HostContext,
+    # GX/audio workers).
+    add_compile_options(-msimd128 -mno-nontrapping-fptoint -fwasm-exceptions -pthread)
+    add_link_options(-fwasm-exceptions -pthread)
 else()
     message(FATAL_ERROR
         "WiiCompiled supports 64-bit LLVM-MinGW Clang on Windows, native Linux x86_64/aarch64, or Apple Clang on macOS x86_64/arm64")

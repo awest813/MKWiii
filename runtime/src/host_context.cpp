@@ -4,7 +4,13 @@
 #include <pthread.h>
 
 #include <atomic>
+#include <cstdint>
 #include <cstdlib>
+#if defined(__EMSCRIPTEN__)
+#include <cmath>
+
+#include <emscripten/threading.h>
+#endif
 #elif defined(_WIN32)
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -39,9 +45,12 @@ namespace {
 struct Context {
     Entry entry = nullptr;
     void* argument = nullptr;
-    // The baton. A thread waits for its own flag to become true; whoever sets it hands over
-    // all memory the previous holder wrote (release/acquire).
-    std::atomic<bool> running{false};
+    // The baton (0 or 1, a 32-bit word so it can be a futex). A thread waits for its own flag to
+    // become 1; whoever sets it hands over all memory the previous holder wrote (release/acquire).
+    std::atomic<uint32_t> running{0};
+    // Set while the thread is (about to be) blocked on `running`, so a handoff only pays for a
+    // wake when one is needed: a context still spinning picks the baton up by itself.
+    std::atomic<uint32_t> sleeping{0};
     // Fields below are only written by the baton holder, so the baton orders them.
     bool started = false;      // has been handed the baton at least once
     bool abandoned = false;    // destroyed before it ever ran: its thread exits instead
@@ -50,32 +59,73 @@ struct Context {
 
 thread_local Context* t_self = nullptr;
 
+// libc++ implements atomic::wait with a futex only on Linux (and a few BSDs); elsewhere, including
+// Emscripten, it polls with a sleeping backoff, which made each wake cost hundreds of
+// microseconds under Node. Use Emscripten's futex (Atomics.wait/notify) directly there.
+bool HasBaton(const Context* context)
+{
+    return context->running.load(std::memory_order_acquire) != 0;
+}
+
+// `sleeping` and `running` form a Dekker handshake (both sides store, then load, sequentially
+// consistent): either the sleeper sees the baton before blocking or the giver sees the sleeper
+// and wakes it. The futex wait itself only blocks while `running` is still 0.
+void SleepUntilBaton(Context* context)
+{
+    context->sleeping.store(1, std::memory_order_seq_cst);
+    while (context->running.load(std::memory_order_seq_cst) == 0) {
+#if defined(__EMSCRIPTEN__)
+        emscripten_futex_wait(&context->running, 0, INFINITY);
+#else
+        context->running.wait(0, std::memory_order_acquire);
+#endif
+    }
+    context->sleeping.store(0, std::memory_order_relaxed);
+}
+
+void GiveBaton(Context* context)
+{
+    context->running.store(1, std::memory_order_seq_cst);
+    if (context->sleeping.load(std::memory_order_seq_cst) == 0) {
+        return;
+    }
+#if defined(__EMSCRIPTEN__)
+    emscripten_futex_wake(&context->running, 1);
+#else
+    context->running.notify_one();
+#endif
+}
+
 // Waking a sleeping thread costs microseconds, but a context usually gets the baton back
 // within a few microseconds (scheduler round trips), so spin briefly before sleeping. Measured
-// with host_context_stress_tests on a 4-core x86-64 Linux host: a scheduler ping-pong drops from
-// ~3.6 us to ~0.4 us per switch, two workers from ~12 us to ~0.5 us; with more runnable contexts
-// than cores spinning stops paying off (~14 us -> ~19 us for eight).
+// with host_context_stress_tests on a 4-core x86-64 Linux host:
+// - native x86-64 (pause in the loop, 4000 iterations): a scheduler ping-pong drops from ~3.6 us
+//   to ~0.4 us per switch, two workers from ~12 us to ~0.5 us; with more runnable contexts than
+//   cores spinning stops paying off (~14 us -> ~19 us for eight).
+// - Emscripten under Node (no pause, so iterations are far cheaper; 40000 iterations): ~0.6 us
+//   ping-pong, ~1 us for two workers, ~6 us for four, against 11-16 us with 4000.
+#if defined(__x86_64__)
 constexpr int kSpinIterations = 4000;
+#else
+constexpr int kSpinIterations = 40000;
+#endif
 
 void WaitForBaton(Context* context)
 {
     for (int i = 0; i < kSpinIterations; ++i) {
-        if (context->running.load(std::memory_order_acquire)) return;
+        if (HasBaton(context)) return;
 #if defined(__x86_64__)
         __builtin_ia32_pause();
 #endif
     }
-    while (!context->running.load(std::memory_order_acquire)) {
-        context->running.wait(false, std::memory_order_acquire);
-    }
+    SleepUntilBaton(context);
 }
 
 void HandOver(Context* source, Context* destination)
 {
     destination->started = true;
-    source->running.store(false, std::memory_order_relaxed);
-    destination->running.store(true, std::memory_order_release);
-    destination->running.notify_one();
+    source->running.store(0, std::memory_order_relaxed);
+    GiveBaton(destination);
 }
 
 void* ThreadMain(void* argument)
@@ -100,7 +150,7 @@ void* ThreadMain(void* argument)
 bool InitializeScheduler(Handle* scheduler)
 {
     auto* context = new Context();
-    context->running.store(true, std::memory_order_relaxed);
+    context->running.store(1, std::memory_order_relaxed);
     context->started = true;
     t_self = context;
     *scheduler = context;
@@ -144,12 +194,11 @@ void Destroy(Handle handle)
         return;
     }
     if (!context->started) {
-        // Wake it with `running` set (atomic::wait only returns on a value change); it sees
+        // Wake it with `running` set (a futex wait only ends on a value change); it sees
         // `abandoned` and exits without touching anything else.
         context->abandoned = true;
         context->started = true;
-        context->running.store(true, std::memory_order_release);
-        context->running.notify_one();
+        GiveBaton(context);
         return;
     }
     // A context that left through ExitTo() has handed over and its thread is exiting on its own.

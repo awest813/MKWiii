@@ -140,7 +140,10 @@ inline bool IsSupportedResolutionMultiplier(float value) {
 // Must stay in step with the backend table in main.cpp, which is what actually
 // maps these to AuroraBackend.
 inline bool IsSupportedGraphicsApi(std::string_view value) {
-#if defined(__APPLE__)
+#if defined(__EMSCRIPTEN__)
+    // The browser's WebGPU is the only backend there.
+    static constexpr std::array<std::string_view, 2> values{"auto", "webgpu"};
+#elif defined(__APPLE__)
     static constexpr std::array<std::string_view, 2> values{"auto", "metal"};
 // only vulkan for linux
 #elif defined(__linux__)
