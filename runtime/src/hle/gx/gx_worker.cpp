@@ -344,6 +344,12 @@ void Start() {
     if (Active()) {
         return;
     }
+#if defined(__EMSCRIPTEN__)
+    // GX execution reaches aurora and WebGPU, whose objects belong to the one JS thread that
+    // created them, so on the web GX always runs inline on the guest thread.
+    RT_LOGF(RT_TAG_GX, "GX worker disabled (web)\n");
+    return;
+#endif
     if (!RuntimeConfigFile::GxWorkerEnabled(true)) {
         RT_LOGF(RT_TAG_GX, "GX worker disabled\n");
         return;

@@ -353,6 +353,41 @@ index 1a86888..7d01250 100644
    uint8_t* const dst = blob.data();
    uint64_t o = 0;
    const auto append = [&](const ByteBuffer& d) noexcept -> bool {
+diff --git a/lib/gx/fifo.cpp b/lib/gx/fifo.cpp
+index afe6328..b1f1ee8 100644
+--- a/lib/gx/fifo.cpp
++++ b/lib/gx/fifo.cpp
+@@ -25,7 +25,12 @@ uint32_t sDlWritePos = 0;
+ 
+ namespace {
+ constexpr Module Log{"aurora::gx::fifo"};
++#ifdef __EMSCRIPTEN__
++// The web build runs single threaded (blocking the browser main thread is not allowed).
++constexpr auto kProcessingMode = ProcessingMode::Drain;
++#else
+ constexpr auto kProcessingMode = ProcessingMode::Thread;
++#endif
+ constexpr uint32_t kDrawBatchSize = 1;
+ 
+ bool sFrameActive = false;
+diff --git a/lib/gx/frame_interpolation.cpp b/lib/gx/frame_interpolation.cpp
+index bd05bac..d7728d4 100644
+--- a/lib/gx/frame_interpolation.cpp
++++ b/lib/gx/frame_interpolation.cpp
+@@ -96,7 +96,13 @@ private:
+     const unsigned hardware = std::thread::hardware_concurrency();
+     // The caller helps too. Cap the helpers: tasks are short memcpy+math, so dispatch
+     // overhead and memory bandwidth dominate past a few threads.
++#ifdef __EMSCRIPTEN__
++    // No helpers on the web: the caller runs every task on the browser main thread.
++    const unsigned helpers = 0;
++    (void)hardware;
++#else
+     const unsigned helpers = hardware > 2 ? std::min(hardware - 1, 6u) : 0;
++#endif
+     m_workers.reserve(helpers);
+     for (unsigned i = 0; i < helpers; ++i) {
+       m_workers.emplace_back([this] { worker_loop(); });
 diff --git a/lib/gx/gx.cpp b/lib/gx/gx.cpp
 index e373bf0..c5376a5 100644
 --- a/lib/gx/gx.cpp
@@ -401,6 +436,23 @@ index 1217385..e1c2b5f 100644
    uint32_t uniformOffset = data.uniformRange.offset;
    if (const int slot = g_interpolationEncodeSlot; slot >= 0 && data.interpUniformBase != UINT32_MAX) {
      uniformOffset = data.interpUniformBase + static_cast<uint32_t>(slot) * gfx::align_uniform(data.uniformRange.size);
+diff --git a/lib/gx/texture.hpp b/lib/gx/texture.hpp
+index ded7bd6..4bf46d3 100644
+--- a/lib/gx/texture.hpp
++++ b/lib/gx/texture.hpp
+@@ -32,7 +32,12 @@ const TextureStats& texture_stats() noexcept;
+ namespace texture {
+ constexpr uint64_t ContentCacheBudgetBytes = 128ull * 1024ull * 1024ull;
+ constexpr uint64_t ObjectCacheIdleFrames = 600;
++#ifdef __EMSCRIPTEN__
++// Replacements load synchronously on the web; worker threads cannot be joined from the browser main thread.
++constexpr bool AsyncTextureReplacements = false;
++#else
+ constexpr bool AsyncTextureReplacements = true;
++#endif
+ constexpr uint32_t ReplacementThumbnailDim = 64;
+ constexpr uint64_t ReplacementPublishBudgetBytes = 12ull * 1024ull * 1024ull;
+ 
 diff --git a/lib/webgpu/gpu.cpp b/lib/webgpu/gpu.cpp
 index 6f4caab..d016cf6 100644
 --- a/lib/webgpu/gpu.cpp

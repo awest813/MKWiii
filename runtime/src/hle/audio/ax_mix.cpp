@@ -1346,6 +1346,10 @@ private:
     }
 
     bool EnsureMixWorker() {
+#if defined(__EMSCRIPTEN__)
+        // The web build mixes inline: waiting for a worker would block the browser main thread.
+        return false;
+#endif
         if (m_mixThread.joinable()) {
             return true;
         }

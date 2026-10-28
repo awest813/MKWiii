@@ -169,6 +169,9 @@ std::atomic_flag g_abortSignalHandled = ATOMIC_FLAG_INIT;
 std::atomic_bool g_fatalErrorReported{false};
 std::atomic_bool g_fatalPopupShown{false};
 bool g_headless = false;
+// `--allow-software-gpu`: accept a CPU (software) graphics adapter, e.g. SwiftShader or llvmpipe on
+// CI machines and headless browsers. Off by default: such adapters are far too slow to play on.
+bool g_allowSoftwareGpu = false;
 std::atomic<int> g_lastExitCode{0};
 std::atomic_bool g_exitCodeSet{false};
 
@@ -457,6 +460,12 @@ void InitializeProcessTranscript(int argc, char** argv) {
         state.file << "\n";
         state.file.flush();
     }
+
+#if defined(__EMSCRIPTEN__)
+    // The browser console already shows stdout/stderr live, and pumping them through pipes would
+    // take two worker threads; the file keeps the header above for log downloads.
+    return;
+#endif
 
     state.savedStdoutFd = DuplicateFileDescriptor(GetFileDescriptor(stdout));
     state.savedStderrFd = DuplicateFileDescriptor(GetFileDescriptor(stderr));
@@ -1353,9 +1362,12 @@ int RuntimeMain(int argc, char** argv) {
 
     try {
         for (int i = 1; i < argc; ++i) {
-            if (std::string_view(argv[i]) != "--headless" && !BootRace::ParseArgument(argv[i])) {
+            const std::string_view arg(argv[i]);
+            if (arg == "--allow-software-gpu") {
+                g_allowSoftwareGpu = true;
+            } else if (arg != "--headless" && !BootRace::ParseArgument(argv[i])) {
                 throw std::invalid_argument(std::string("Unknown command-line option '") + argv[i] +
-                                            "'; the game runtime only accepts --race[=<course id>], --race-cpu and --headless, use Config.toml through the installed host.");
+                                            "'; the game runtime only accepts --race[=<course id>], --race-cpu, --headless and --allow-software-gpu, use Config.toml through the installed host.");
             }
         }
         if (g_headless && !BootRace::Requested()) {
@@ -1411,6 +1423,7 @@ int RuntimeMain(int argc, char** argv) {
         auroraConfig.allowTextureDumps = auroraConfig.allowTextureReplacements &&
                                          RuntimeConfigFile::TextureDumps(false);
         auroraConfig.vsync = RuntimeConfigFile::Vsync();
+        auroraConfig.allowCpuAdapter = g_allowSoftwareGpu;
         auroraConfig.desiredBackend = BACKEND_AUTO;
         const float resolutionMultiplier = RuntimeConfigFile::ResolutionMultiplier(1.0f);
         ConfigureMkwDynamicAspect(configWidescreen, forceAspect,

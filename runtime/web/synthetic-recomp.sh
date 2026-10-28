@@ -42,13 +42,14 @@ copy_tree() {
 copy_tree "$root" "" runtime
 copy_tree "$root/aurora-main" "aurora-main/"
 
-# One synthetic text section: li r3,40; addi r3,r3,2; nop; blr. The runtime resolves the guest
+# One synthetic text section at the runtime's fixed boot address (kDefaultEntryAddress in
+# runtime/include/system_bridge.h): li r3,40; addi r3,r3,2; nop; blr. The runtime resolves the guest
 # functions it calls directly through the registry at run time, so the product links without any
-# game code.
+# game code, boots, runs this function and returns.
 python3 - "$stage" <<'EOF'
 import pathlib, struct, sys
 stage = pathlib.Path(sys.argv[1])
-entry, text_size = 0x80001000, 0x10
+entry, text_size = 0x800060A4, 0x10
 data_offset = 0x100 + text_size
 dol = bytearray(data_offset + 4)
 def put(offset, value): struct.pack_into('>I', dol, offset, value)
@@ -96,14 +97,14 @@ dotnet build "$root/translator/src/Translator.Cli/Translator.Cli.csproj" -c Rele
 translator="$root/translator/src/Translator.Cli/bin/Release/net8.0/Translator.Cli.dll"
 manifest="$stage/recomp.yml"
 metadata="$stage/generated/base_translation_output.json"
-dotnet "$translator" translate-recursive 0x80001000 --project "$manifest" \
+dotnet "$translator" translate-recursive 0x800060A4 --project "$manifest" \
     --output-metadata "$metadata" --threads "$parallel"
 # Function-map seeds can be skipped by discovery; do not accept a partial fixture.
 python3 - "$metadata" <<'EOF'
 import json, sys
 functions = json.load(open(sys.argv[1]))['functions']
-if 0x80001000 not in {f['entryPoint'] for f in functions}:
-    sys.exit('synthetic-recomp: synthetic function 0x80001000 was not translated')
+if 0x800060A4 not in {f['entryPoint'] for f in functions}:
+    sys.exit('synthetic-recomp: synthetic function 0x800060A4 was not translated')
 EOF
 dotnet "$translator" generate-data-init --project "$manifest"
 dotnet "$translator" emit-build-shards --project "$manifest"

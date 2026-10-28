@@ -191,6 +191,20 @@ function(mkw_configure_product target)
 
     target_link_libraries(${target} PRIVATE
         aurora::gx aurora::pad aurora::si aurora::vi aurora::mtx)
+    if(MKW_PLATFORM_WEB)
+        # Guest threads, aurora and WebGPU share the browser's main thread under JSPI (see
+        # host_context.h); host worker threads (audio mixing, timers) come from a pthread pool
+        # created up front. Guest RAM plus aurora's caches need well over Emscripten's default
+        # memory, and translated call chains need a deep C stack.
+        target_link_options(${target} PRIVATE
+            -sJSPI -sJSPI_EXPORTS=mkw_host_context_run
+            -sINITIAL_MEMORY=1GB -sALLOW_MEMORY_GROWTH=1 -sMAXIMUM_MEMORY=4GB
+            -sSTACK_SIZE=8MB -sDEFAULT_PTHREAD_STACK_SIZE=1MB -sPTHREAD_POOL_SIZE=8
+            -sALLOW_BLOCKING_ON_MAIN_THREAD=0
+            "-sEXPORTED_RUNTIME_METHODS=['FS','callMain']"
+            # Function names in the module, so crash reports and stacks stay readable.
+            --profiling-funcs)
+    endif()
     if(MKW_PLATFORM_MACOS)
         target_link_libraries(${target} PRIVATE
             "${MKW_IOKIT_FRAMEWORK}" "${MKW_COREFOUNDATION_FRAMEWORK}" "${MKW_COREAUDIO_FRAMEWORK}")
