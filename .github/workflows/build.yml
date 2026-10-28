@@ -71,7 +71,7 @@ jobs:
           ctest --test-dir build-platform --output-on-failure
 
   web_isa:
-    name: Web ISA (wasm32 vs native digests)
+    name: Web ISA (WASI and Emscripten vs native digests)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
@@ -84,10 +84,18 @@ jobs:
           sudo apt-get install -y --no-install-recommends clang-18 lld-18
           wasi-libc libc++-18-dev-wasm32 libc++abi-18-dev-wasm32 libclang-rt-18-dev-wasm32
 
+      - name: Install Emscripten
+        run: |
+          git clone --depth 1 https://github.com/emscripten-core/emsdk.git "$RUNNER_TEMP/emsdk"
+          "$RUNNER_TEMP/emsdk/emsdk" install 6.0.13
+          "$RUNNER_TEMP/emsdk/emsdk" activate 6.0.13
+
       - name: Compare native and wasm32 ISA helper digests
         env:
           CXX: clang++-18
-        run: runtime/web/isa-differential.sh
+        run: |
+          source "$RUNNER_TEMP/emsdk/emsdk_env.sh"
+          runtime/web/isa-differential.sh
 
   macos_substrate:
     name: macOS arm64 (configure + substrate tests)
