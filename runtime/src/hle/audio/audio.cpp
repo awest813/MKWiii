@@ -1,5 +1,6 @@
 #include "memory.h"
 #include "guest_interrupt_context.h"
+#include "guest_domain_local.h"
 #include "hle_stubs.h"
 #include "ppc_runtime.h"
 #include "audio_backend.h"
@@ -501,7 +502,7 @@ namespace {
 int64_t ConsumeAudioPollDeltaMicros()
 {
     using Clock = std::chrono::steady_clock;
-    static thread_local Clock::time_point lastPoll = Clock::now();
+    static MKW_GUEST_DOMAIN_LOCAL Clock::time_point lastPoll = Clock::now();
 
     // Cap the catch-up interval after a debugger pause or host stall; backlog drains via
     // kMaxBlocksPerTick per pass. Never return early on a zero delta: two scheduler passes

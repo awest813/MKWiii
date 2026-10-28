@@ -86,6 +86,31 @@ if(MKW_PLATFORM_LINUX)
     target_compile_features(mkw_linux_host_context_tests PRIVATE cxx_std_17)
     target_link_libraries(mkw_linux_host_context_tests PRIVATE mkw::libco)
     add_test(NAME mkw_linux_host_context_tests COMMAND mkw_linux_host_context_tests)
+
+    add_executable(mkw_linux_host_context_stress_tests
+        "${MKW_TEST_RUNTIME_DIR}/tests/host_context_stress_tests.cpp"
+        "${MKW_TEST_RUNTIME_DIR}/src/host_context.cpp")
+    target_include_directories(mkw_linux_host_context_stress_tests PRIVATE
+        "${MKW_TEST_RUNTIME_DIR}/include"
+        "${MKW_TEST_RUNTIME_DIR}/third_party/libco")
+    target_compile_features(mkw_linux_host_context_stress_tests PRIVATE cxx_std_17)
+    target_link_libraries(mkw_linux_host_context_stress_tests PRIVATE mkw::libco)
+    add_test(NAME mkw_linux_host_context_stress_tests COMMAND mkw_linux_host_context_stress_tests)
+
+    # The web build's thread-backed HostContext is plain pthreads, so exercise it natively.
+    find_package(Threads REQUIRED)
+    foreach(test IN ITEMS host_context host_context_stress)
+        add_executable(mkw_threaded_${test}_tests
+            "${MKW_TEST_RUNTIME_DIR}/tests/${test}_tests.cpp"
+            "${MKW_TEST_RUNTIME_DIR}/src/host_context.cpp")
+        target_include_directories(mkw_threaded_${test}_tests PRIVATE "${MKW_TEST_RUNTIME_DIR}/include")
+        target_compile_definitions(mkw_threaded_${test}_tests PRIVATE MKW_HOST_CONTEXT_THREADS=1)
+        target_compile_features(mkw_threaded_${test}_tests PRIVATE cxx_std_20)
+        target_link_libraries(mkw_threaded_${test}_tests PRIVATE Threads::Threads)
+    endforeach()
+    add_test(NAME mkw_threaded_host_context_tests COMMAND mkw_threaded_host_context_tests)
+    # Two workers: with more spinning contexts than CI cores the run is slow, not more thorough.
+    add_test(NAME mkw_threaded_host_context_stress_tests COMMAND mkw_threaded_host_context_stress_tests 2)
 endif()
 
 if(MKW_PLATFORM_WINDOWS)

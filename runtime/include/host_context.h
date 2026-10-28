@@ -8,6 +8,17 @@
 // the local assembly backend because it must preserve Darwin's platform-reserved
 // x18 register, which libco's AArch64 backend does not save. Its handles are
 // only valid on the thread that initialized the scheduler.
+//
+// The web build has no stack switching at all (Asyncify would instrument nearly
+// every translated function), so there each context is a real host thread and
+// Switch() hands a single baton between them: exactly one context runs at a
+// time and only at Switch() calls, which keeps the cooperative semantics. Any
+// host can opt into that backend with MKW_HOST_CONTEXT_THREADS, which is how it
+// is tested natively. See guest_domain_local.h for the state this affects.
+#if defined(__wasm__) && !defined(MKW_HOST_CONTEXT_THREADS)
+#define MKW_HOST_CONTEXT_THREADS 1
+#endif
+
 namespace HostContext {
 
 using Handle = void*;

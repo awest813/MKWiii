@@ -18,6 +18,7 @@
 #include <windows.h>
 #endif
 
+#include "guest_domain_local.h"
 #include "ppc_runtime.h"
 
 // Forward declarations
@@ -120,7 +121,8 @@ private:
     static uint32_t s_currentGuestThread;
     static bool s_initialized;
     // Stored CPU context pointer for fiber switches
-    static thread_local CpuContext* s_cpuContext;
+    // Handoff from the switching context to the target; guest-scoped, see guest_domain_local.h.
+    static MKW_GUEST_DOMAIN_LOCAL CpuContext* s_cpuContext;
 
     static void PurgePendingFibers();
 };

@@ -22,7 +22,7 @@ std::vector<void*> GuestFiberManager::s_fibersPendingDelete;
 void* GuestFiberManager::s_schedulerFiber = nullptr;
 uint32_t GuestFiberManager::s_currentGuestThread = 0;
 bool GuestFiberManager::s_initialized = false;
-thread_local CpuContext* GuestFiberManager::s_cpuContext = nullptr;
+MKW_GUEST_DOMAIN_LOCAL CpuContext* GuestFiberManager::s_cpuContext = nullptr;
 
 void GuestFiberManager::PurgePendingFibers() {
     std::vector<void*> toDelete;
@@ -582,6 +582,10 @@ void GuestFiberManager::FiberProc(void* param)
     
     // Create a CpuContextScope for this fiber
     CpuContextScope scope(cpu);
+    // The switching side mirrored this context's FPSCR[NI] into its host FP mode before the
+    // switch. That is this host thread for fibers, but a different one for thread-backed
+    // contexts, so mirror it here as well (idempotent on fiber hosts).
+    MkwApplyHostNiMode(cpu->fpscr);
     
     int startDeferAttempts = 0;
     while (entryPoint == MKW_GADDR(8024373c)) { // EGG::Thread::start

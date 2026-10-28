@@ -6,6 +6,7 @@
 
 #include "abi_bridge.h"
 #include "memory.h"
+#include "guest_domain_local.h"
 #include "guest_interrupt_context.h"
 #include "hle_stubs.h"
 #include "ppc_runtime.h"
@@ -27,7 +28,7 @@ namespace {
 //   0x14 = next
 constexpr uint32_t kAlarmPrevOffset = 0x10u;
 constexpr uint32_t kAlarmNextOffset = 0x14u;
-thread_local int g_alarmProcessDepth = 0;
+MKW_GUEST_DOMAIN_LOCAL int g_alarmProcessDepth = 0;
 
 struct AlarmProcessScope {
     AlarmProcessScope() { ++g_alarmProcessDepth; }

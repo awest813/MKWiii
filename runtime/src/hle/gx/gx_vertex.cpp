@@ -2,6 +2,7 @@
 #include "gx_internal.h"
 #include "gx_stream_common.h"
 #include "fiber_manager.h"
+#include "guest_domain_local.h"
 #include "guest_interrupt_context.h"
 #include "runtime_log.h"
 
@@ -272,8 +273,8 @@ PPC_NATIVE_OVERRIDE_VOID(8016f348, GX__SetPointSize_8016f348, (uint32_t pointSiz
 // ============================================================================
 
 namespace {
-thread_local bool g_inGxBeginOrFifo = false;
-thread_local std::chrono::steady_clock::time_point g_nextDeferredTimingPoll{};
+MKW_GUEST_DOMAIN_LOCAL bool g_inGxBeginOrFifo = false;
+MKW_GUEST_DOMAIN_LOCAL std::chrono::steady_clock::time_point g_nextDeferredTimingPoll{};
 
 void ServiceDeferredTimingDuringGxWork() {
     if (g_inGxBeginOrFifo) {

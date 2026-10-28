@@ -617,24 +617,32 @@ MKW_MEMORY_FORCE_INLINE void FlatWriteFloat64(uint32_t address, double value) {
 // 0xCC000000..0xCDFFFFFF PAGE_NOACCESS, so a stray MMIO store faults into the same handler and diagnostic as the checked path, just reported
 // instead of dispatched inline. Never use these for an address the translator hasn't proven.
 
+// Hosts without a flat reservation (wasm) have no base to store through, so these take the
+// checked path like FlatWrite*; the translator's RAM proof only saves the policy check there.
+
 MKW_MEMORY_FORCE_INLINE void FlatWriteRam8(uint32_t address, uint8_t value) {
+    if constexpr (!GuestFlat::kHasFlatReservation) { Memory::Write8(address, value); return; }
     FlatStore<uint8_t>(address, value);
 }
 
 MKW_MEMORY_FORCE_INLINE void FlatWriteRam16(uint32_t address, uint16_t value) {
+    if constexpr (!GuestFlat::kHasFlatReservation) { Memory::Write16(address, value); return; }
     FlatStore<uint16_t>(address, value);
 }
 
 MKW_MEMORY_FORCE_INLINE void FlatWriteRam32(uint32_t address, uint32_t value) {
+    if constexpr (!GuestFlat::kHasFlatReservation) { Memory::Write32(address, value); return; }
     FlatStore<uint32_t>(address, value);
 }
 
 
 MKW_MEMORY_FORCE_INLINE void FlatWriteRamFloat32(uint32_t address, double value) {
+    if constexpr (!GuestFlat::kHasFlatReservation) { Memory::WriteFloat32(address, value); return; }
     FlatStore<uint32_t>(address, ConvertPpcDoubleToSingleBits(value));
 }
 
 MKW_MEMORY_FORCE_INLINE void FlatWriteRamFloat64(uint32_t address, double value) {
+    if constexpr (!GuestFlat::kHasFlatReservation) { Memory::WriteFloat64(address, value); return; }
     uint64_t bits = 0;
     std::memcpy(&bits, &value, sizeof(bits));
     FlatStore<uint64_t>(address, bits);

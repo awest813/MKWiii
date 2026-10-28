@@ -1,6 +1,11 @@
 #include "host_context.h"
 
-#if defined(_WIN32)
+#if defined(MKW_HOST_CONTEXT_THREADS)
+#include <pthread.h>
+
+#include <atomic>
+#include <cstdlib>
+#elif defined(_WIN32)
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -25,7 +30,141 @@ extern "C" void* mkw_co_init(void* stackTop, void (*entry)(void*), void* argumen
 
 namespace HostContext {
 
-#if defined(_WIN32)
+#if defined(MKW_HOST_CONTEXT_THREADS)
+
+namespace {
+struct Context {
+    Entry entry = nullptr;
+    void* argument = nullptr;
+    // The baton. A thread waits for its own flag to become true; whoever sets it hands over
+    // all memory the previous holder wrote (release/acquire).
+    std::atomic<bool> running{false};
+    std::atomic<bool> abandoned{false};  // destroyed before it ever ran
+    bool started = false;                // only touched by the context's own thread and Destroy
+};
+
+thread_local Context* t_self = nullptr;
+
+// Waking a sleeping thread costs microseconds, but a context usually gets the baton back
+// within a few microseconds (scheduler round trips), so spin briefly before sleeping. Measured
+// with host_context_stress_tests on a 4-core x86-64 Linux host: a scheduler ping-pong drops from
+// ~3.6 us to ~0.4 us per switch, two workers from ~12 us to ~0.5 us; with more runnable contexts
+// than cores spinning stops paying off (~14 us -> ~19 us for eight).
+constexpr int kSpinIterations = 4000;
+
+void WaitForBaton(Context* context)
+{
+    for (int i = 0; i < kSpinIterations; ++i) {
+        if (context->running.load(std::memory_order_acquire)) return;
+#if defined(__x86_64__)
+        __builtin_ia32_pause();
+#endif
+    }
+    while (!context->running.load(std::memory_order_acquire)) {
+        context->running.wait(false, std::memory_order_acquire);
+    }
+}
+
+void* ThreadMain(void* argument)
+{
+    auto* context = static_cast<Context*>(argument);
+    t_self = context;
+    while (!context->running.load(std::memory_order_acquire)) {
+        if (context->abandoned.load(std::memory_order_acquire)) {
+            // Destroyed before its first Switch(): nothing references it any more.
+            delete context;
+            return nullptr;
+        }
+        context->running.wait(false, std::memory_order_acquire);
+    }
+    context->entry(context->argument);
+
+    // A guest fiber must return through FiberProc's scheduler handoff, never off the end.
+    std::abort();
+}
+} // namespace
+
+bool InitializeScheduler(Handle* scheduler)
+{
+    auto* context = new Context();
+    context->running.store(true, std::memory_order_relaxed);
+    context->started = true;
+    t_self = context;
+    *scheduler = context;
+    return true;
+}
+
+void ShutdownScheduler(Handle scheduler)
+{
+    auto* context = static_cast<Context*>(scheduler);
+    if (t_self == context) {
+        t_self = nullptr;
+    }
+    delete context;
+}
+
+Handle Create(std::size_t stackSize, Entry entry, void* argument)
+{
+    auto* context = new Context();
+    context->entry = entry;
+    context->argument = argument;
+
+    pthread_attr_t attributes;
+    if (pthread_attr_init(&attributes) != 0) {
+        delete context;
+        return nullptr;
+    }
+    pthread_attr_setstacksize(&attributes, stackSize);
+    pthread_attr_setdetachstate(&attributes, PTHREAD_CREATE_DETACHED);
+    pthread_t thread;
+    const int created = pthread_create(&thread, &attributes, ThreadMain, context);
+    pthread_attr_destroy(&attributes);
+    if (created != 0) {
+        delete context;
+        return nullptr;
+    }
+    return context;
+}
+
+void Destroy(Handle handle)
+{
+    auto* context = static_cast<Context*>(handle);
+    if (!context) {
+        return;
+    }
+    // Only the baton holder calls Destroy, and a context only starts once it has been handed the
+    // baton, so `started` is stable here. Switch() sets it on the destination before the handoff.
+    if (!context->started) {
+        context->abandoned.store(true, std::memory_order_release);
+        context->running.notify_one();
+        return;
+    }
+    // A context that has run is parked inside Switch() on a stack that native backends simply
+    // free. A thread's stack cannot be dropped without unwinding it, so the thread stays parked
+    // (it never gets the baton again) and its Context stays allocated for it.
+}
+
+bool IsCurrent(Handle context)
+{
+    return context != nullptr && context == t_self;
+}
+
+void Switch(Handle target)
+{
+    auto* destination = static_cast<Context*>(target);
+    Context* source = t_self;
+    if (!destination || destination == source) {
+        return;
+    }
+
+    destination->started = true;
+    source->running.store(false, std::memory_order_relaxed);
+    destination->running.store(true, std::memory_order_release);
+    destination->running.notify_one();
+    WaitForBaton(source);
+}
+
+#elif defined(_WIN32)
 
 namespace {
 thread_local bool g_convertedScheduler = false;

@@ -31,11 +31,23 @@ inline constexpr uintptr_t kFixedFlatGuestBase = 0x0000'0080'0000'0000ull;
 // probing to sit far below where the PIE image, heap, shared libraries and
 // stack actually land (all clustered above ~340 GiB on a 39-bit/512 GiB system).
 inline constexpr uintptr_t kFixedFlatGuestBase = 0x0000'0010'0000'0000ull;
+#elif defined(__wasm__)
+// wasm32 linear memory is at most 4 GiB including the runtime itself, and has no page
+// protection or fault handling, so there is no flat reservation: every access goes through the
+// checked page-table path (RequiresCheckedAccess() below), which needs neither.
+#define MKW_GUEST_FLAT_NO_RESERVATION 1
 #else
 #error "guest_abi/flat_memory.h has no fixed flat guest base chosen for this architecture"
 #endif
 
+#if defined(MKW_GUEST_FLAT_NO_RESERVATION)
+// Only reachable from flat-path branches that RequiresCheckedAccess() makes dead.
+#define MKW_FLAT_GUEST_BASE (static_cast<uint8_t*>(nullptr))
+inline constexpr bool kHasFlatReservation = false;
+#else
 #define MKW_FLAT_GUEST_BASE (reinterpret_cast<uint8_t*>(GuestFlat::kFixedFlatGuestBase))
+inline constexpr bool kHasFlatReservation = true;
+#endif
 
 // True when a host VM page covers more than one 4 KiB Wii page. In that
 // configuration, guest-view page protection cannot safely represent per-Wii-
@@ -49,7 +61,9 @@ inline constexpr uintptr_t kFixedFlatGuestBase = 0x0000'0010'0000'0000ull;
 #define MKW_GUEST_FLAT_FIXED_PAGE_SIZE 1
 #endif
 
-#if defined(MKW_GUEST_FLAT_FIXED_PAGE_SIZE)
+#if defined(MKW_GUEST_FLAT_NO_RESERVATION)
+inline constexpr bool RequiresCheckedAccess() noexcept { return true; }
+#elif defined(MKW_GUEST_FLAT_FIXED_PAGE_SIZE)
 inline constexpr bool RequiresCheckedAccess() noexcept { return false; }
 #else
 extern bool g_requiresCheckedAccess;
