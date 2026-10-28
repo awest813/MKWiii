@@ -383,8 +383,9 @@ Each phase ends with something testable and adds a CI job, so it doesn't regress
 - **Guest memory (Phase 2, code only).** No flat reservation on wasm; `RequiresCheckedAccess()`
   is a compile-time `true`, `FlatWriteRam*` takes the checked path, and
   `src/guest_flat_memory_web.cpp` backs regions with plain allocations.
-- **Guest threads (Phase 3, code only).** Thread-backed `HostContext` (`MKW_HOST_CONTEXT_THREADS`,
-  default on wasm) with an atomic baton, plus `MKW_GUEST_DOMAIN_LOCAL`
+- **Guest threads (Phase 3).** Two wasm `HostContext` backends: JSPI (`MKW_HOST_CONTEXT_JSPI`,
+  the Emscripten default; every context is a suspendable stack on the browser main thread) and
+  thread-backed (`MKW_HOST_CONTEXT_THREADS`, the WASI default) with an atomic baton, plus `MKW_GUEST_DOMAIN_LOCAL`
   (`include/guest_domain_local.h`) for the guest-scoped state that relied on fibers sharing one
   host thread's TLS. `host_context_tests` and the new `host_context_stress_tests` run against it
   natively in the platform test suite.
@@ -406,6 +407,20 @@ Each phase ends with something testable and adds a CI job, so it doesn't regress
     checks the presented pixels (CI job `web_smoke`). Headless Chromium here cannot allocate a
     WebGPU canvas swap chain on SwiftShader, so the harness substitutes an offscreen texture for
     the canvas's; everything up to the browser's compositing step runs for real.
+- **The product in a browser (Phase 4, first boot).** `runtime/web/synthetic-recomp.sh` translates
+  a synthetic DOL (no game data) whose one function sits at the runtime's fixed boot address and
+  builds the real `WiiCompiled` product with Emscripten; `runtime/web/run-product.mjs` runs it in
+  headless Chromium. It initializes WebGPU, runs the translated PowerPC code (`func_800060A4 =>
+  0x2a (42)`), shuts aurora down and exits 0 (CI job `web_product`). What made that work:
+  - Nothing may block the browser main thread (`-sALLOW_BLOCKING_ON_MAIN_THREAD=0`), so on the
+    web aurora's GX FIFO processes at `drain()`, frame interpolation has no helper threads,
+    texture replacements load synchronously, and the runtime's GX worker and AX mix worker are
+    off (both already had inline paths).
+  - The product page (`runtime/web/product/WiiCompiled.html`, installed next to the build) takes
+    runtime arguments from the query string and reports exit and abort to the harness.
+  - `--allow-software-gpu` lets aurora take a CPU adapter (SwiftShader); without it a headless
+    browser has no adapter aurora will accept.
+  - On the web the process transcript keeps stdout/stderr on the console rather than pipes.
 
 ### Measured
 
@@ -432,11 +447,12 @@ Each phase ends with something testable and adds a CI job, so it doesn't regress
 
 ### Next
 
-- Install Emscripten and build the platform tests, the ISA differential and the runtime for
-  `wasm32-unknown-emscripten` (this environment only had a WASI sysroot without threads,
-  exceptions or a filesystem).
-- Web platform layer: signal handlers, paths, Discord, music ducking and the CPU-baseline check.
-- Phase 0 spikes (b) and (c) in a real browser, then Phase 4 (aurora).
+- A real game build: translate the user's PAL disc with the web toolchain (Phase 5 Setup flow),
+  then size the module and measure startup and frame time.
+- Disc import and saves on OPFS (section 8), audio through Web Audio (section 9), gamepad and
+  keyboard input (section 10).
+- A presenting canvas in a real GPU browser; headless Chromium here only proves the render path.
+- Browser switch-cost numbers for the JSPI backend.
 
 ## Decisions
 

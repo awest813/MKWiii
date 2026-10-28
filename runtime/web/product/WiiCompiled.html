@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>@MKW_WEB_PRODUCT@</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  body { margin: 0; background: #000; color: #ddd; font: 14px system-ui, sans-serif; }
+  canvas { display: block; width: 100vw; height: 100vh; object-fit: contain; }
+  #status { position: fixed; left: 16px; bottom: 16px; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<canvas id="canvas" width="640" height="480" tabindex="-1"></canvas>
+<div id="status"></div>
+<script>
+// Runtime arguments come from the query string: ?arg=--allow-software-gpu&arg=... (one per arg).
+const mkwArgs = new URLSearchParams(location.search).getAll('arg');
+const mkwStatus = document.getElementById('status');
+const mkwState = { exitStatus: null, aborted: null, log: [] };
+function mkwLog(text) {
+  mkwState.log.push(text);
+  if (mkwState.log.length > 2000) mkwState.log.shift();
+}
+var Module = {
+  canvas: document.getElementById('canvas'),
+  arguments: mkwArgs,
+  print: (text) => { mkwLog(text); console.log(text); },
+  printErr: (text) => { mkwLog(text); console.error(text); },
+  onExit: (status) => { mkwState.exitStatus = status; mkwStatus.textContent = `exited (${status})`; },
+  onAbort: (what) => { mkwState.aborted = String(what); mkwStatus.textContent = `aborted: ${what}`; },
+};
+if (!globalThis.crossOriginIsolated) {
+  mkwStatus.textContent = 'This page must be served with cross-origin isolation (COOP/COEP headers).';
+} else if (!navigator.gpu) {
+  mkwStatus.textContent = 'This browser has no WebGPU.';
+}
+// Read by run-product.mjs.
+window.mkwProbe = () => ({ exitStatus: mkwState.exitStatus, aborted: mkwState.aborted, log: mkwState.log.slice() });
+</script>
+<script src="@MKW_WEB_PRODUCT@.js"></script>
+</body>
+</html>

@@ -202,8 +202,16 @@ function(mkw_configure_product target)
             -sSTACK_SIZE=8MB -sDEFAULT_PTHREAD_STACK_SIZE=1MB -sPTHREAD_POOL_SIZE=8
             -sALLOW_BLOCKING_ON_MAIN_THREAD=0
             "-sEXPORTED_RUNTIME_METHODS=['FS','callMain']"
+            # main() returning reaches the page's Module.onExit (runtime/web/product).
+            -sEXIT_RUNTIME=1
             # Function names in the module, so crash reports and stacks stay readable.
             --profiling-funcs)
+        # The page that loads the product, next to its .js and .wasm.
+        set(MKW_WEB_PRODUCT ${target})
+        configure_file("${PROJECT_SOURCE_DIR}/web/product/WiiCompiled.html"
+            "${CMAKE_CURRENT_BINARY_DIR}/${target}.html.in" @ONLY)
+        file(GENERATE OUTPUT "$<TARGET_FILE_DIR:${target}>/${target}.html"
+            INPUT "${CMAKE_CURRENT_BINARY_DIR}/${target}.html.in")
     endif()
     if(MKW_PLATFORM_MACOS)
         target_link_libraries(${target} PRIVATE

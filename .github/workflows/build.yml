@@ -133,6 +133,38 @@ jobs:
           "$RUNNER_TEMP/pw/node_modules/.bin/playwright" install --with-deps chromium
           NODE_PATH="$RUNNER_TEMP/pw/node_modules" node runtime/web/smoke/run-smoke.mjs build-web-smoke
 
+  web_product:
+    name: Web (synthetic product runs in headless Chromium)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          submodules: true
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Install Emscripten
+        run: |
+          git clone --depth 1 https://github.com/emscripten-core/emsdk.git "$RUNNER_TEMP/emsdk"
+          "$RUNNER_TEMP/emsdk/emsdk" install 6.0.13
+          "$RUNNER_TEMP/emsdk/emsdk" activate 6.0.13
+
+      - name: Translate a synthetic DOL and build the product for the web
+        run: |
+          source "$RUNNER_TEMP/emsdk/emsdk_env.sh"
+          runtime/web/apply-aurora-patch.sh
+          runtime/web/synthetic-recomp.sh "$RUNNER_TEMP/synthetic" --parallel 3
+
+      - name: Run it in headless Chromium (WebGPU on SwiftShader)
+        run: |
+          npm install --no-save --prefix "$RUNNER_TEMP/pw" playwright@1.63.0
+          "$RUNNER_TEMP/pw/node_modules/.bin/playwright" install --with-deps chromium
+          NODE_PATH="$RUNNER_TEMP/pw/node_modules" node runtime/web/run-product.mjs \
+            "$RUNNER_TEMP/synthetic/web-build" --expect-log 'func_800060A4 => 0x2a \(42\)'
+
   macos_substrate:
     name: macOS arm64 (configure + substrate tests)
     runs-on: macos-14
