@@ -17,6 +17,12 @@
 // scalar-built helpers below only match on non-denormal operands. Their NI-set digests are tagged
 // [host-daz] and excluded from the cross-host comparison (they are still compared with NI clear).
 //
+// Out-of-range and NaN float->int casts are undefined in C++, but runtime code and translated
+// code built from it inherit whatever the host does, and x86 yields INT_MIN. Wasm matches that
+// only without the saturating conversions (-mno-nontrapping-fptoint), which newer LLVM enables
+// by default; the cast_to_int digest catches a build that loses the flag. AArch64 saturates like
+// those conversions do, so that digest is tagged [host-cast] and only compared against x86.
+//
 // Usage: isa_differential_tests [iterations [trace-op]]
 
 #include "isa/ppc_isa_float.h"
@@ -149,7 +155,7 @@ enum Op : int {
     kPsAdd, kPsSub, kPsMul, kPsDiv, kPsMadd, kPsMsub, kPsNmadd, kPsNmsub, kPsMadds0,
     kPsMadds1, kPsMuls0, kPsMuls1, kPsSum0, kPsSum1, kPsMerge, kPsSel, kPsNegAbs, kPsRes,
     kPsFromScalar, kForceSingle, kFmadds, kFmuls, kFres, kFrsqrte, kFctiwz, kDoubleToSingle,
-    kPsqFloatBits, kPsqQuantize, kPsqDequantize, kPsqU8Scale61, kPsqHostRoundTrip, kOpCount
+    kPsqFloatBits, kPsqQuantize, kPsqDequantize, kPsqU8Scale61, kPsqHostRoundTrip, kCastToInt, kOpCount
 };
 
 // Helpers whose NI-set behavior comes from the host's global DAZ/FTZ (see header comment).
@@ -169,7 +175,7 @@ const char* const kOpNames[kOpCount] = {
     "ps_madds0", "ps_madds1", "ps_muls0", "ps_muls1", "ps_sum0", "ps_sum1", "ps_merge",
     "ps_sel", "ps_neg_abs", "ps_res", "ps_from_scalar", "force_single", "fmadds_family",
     "fmuls", "fres", "frsqrte", "fctiwz", "double_to_single", "psq_float_bits",
-    "psq_quantize", "psq_dequantize", "psq_u8_scale61", "psq_host_round_trip",
+    "psq_quantize", "psq_dequantize", "psq_u8_scale61", "psq_host_round_trip", "cast_to_int",
 };
 
 void RunOnce(Digest* digests, Rng& rng)
@@ -250,6 +256,12 @@ void RunOnce(Digest* digests, Rng& rng)
     std::memcpy(&hostBits, host, sizeof(hostBits));
     digests[kPsqHostRoundTrip].Add(hostBits);
     digests[kPsqHostRoundTrip].AddDouble(PpcLoadPairPsqFloatFromHostInline(host));
+
+    // Volatile so the casts happen at run time with the host's conversion instruction.
+    volatile float castSingle = lane;
+    volatile double castDouble = d;
+    digests[kCastToInt].Add(static_cast<uint32_t>(static_cast<int32_t>(castSingle)));
+    digests[kCastToInt].Add(static_cast<uint32_t>(static_cast<int32_t>(castDouble)));
 }
 
 }  // namespace
@@ -269,7 +281,8 @@ int main(int argc, char** argv)
             std::printf("ni=%u %-20s %016llx %llu%s\n", fpscr == 4u ? 1u : 0u, digest.name,
                         static_cast<unsigned long long>(digest.hash),
                         static_cast<unsigned long long>(digest.count),
-                        fpscr == 4u && UsesHostDaz(i) ? " [host-daz]" : "");
+                        fpscr == 4u && UsesHostDaz(i) ? " [host-daz]"
+                            : i == kCastToInt ? " [host-cast]" : "");
         }
     }
     MkwApplyHostNiMode(0);

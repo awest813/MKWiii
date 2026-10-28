@@ -40,6 +40,10 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(
 elseif(EMSCRIPTEN)
     # Work in progress, see docs/web-port-plan.md.
     set(MKW_PLATFORM_WEB TRUE)
+    # Required everywhere, translated code included: the ISA headers need SIMD128, and float->int
+    # casts must keep x86's INT_MIN result for NaN/out-of-range values instead of saturating
+    # (runtime/tests/isa_differential_tests.cpp, cast_to_int).
+    add_compile_options(-msimd128 -mno-nontrapping-fptoint)
 else()
     message(FATAL_ERROR
         "WiiCompiled supports 64-bit LLVM-MinGW Clang on Windows, native Linux x86_64/aarch64, or Apple Clang on macOS x86_64/arm64")

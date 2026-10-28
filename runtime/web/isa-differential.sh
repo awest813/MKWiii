@@ -16,17 +16,21 @@ flags=(-O2 -std=c++20 -fno-fast-math -ffp-contract=off
 src="$root/runtime/tests/isa_differential_tests.cpp"
 
 native_flags=()
-case "$(uname -m)" in x86_64|amd64) native_flags=(-march=x86-64-v3) ;; esac
+native_is_x86=false
+case "$(uname -m)" in x86_64|amd64) native_flags=(-march=x86-64-v3); native_is_x86=true ;; esac
 "$cxx" "${flags[@]}" "${native_flags[@]}" "$src" -o "$out/isa_native"
 "$cxx" --target=wasm32-wasi --sysroot="$sysroot" -isystem "$sysroot/include/wasm32-wasi/c++/v1" \
-    -msimd128 -fno-exceptions "${flags[@]}" "$src" -o "$out/isa.wasm"
+    -msimd128 -mno-nontrapping-fptoint -fno-exceptions "${flags[@]}" "$src" -o "$out/isa.wasm"
 
 # Write to files, not pipes: WASI stdio in Node drops output when a pipe would block.
 "$out/isa_native" "$@" > "$out/native.full.txt"
 node --no-warnings "$root/runtime/web/run-wasi.mjs" "$out/isa.wasm" "$@" > "$out/wasm.full.txt"
-# [host-daz] digests are expected to differ; see the header of isa_differential_tests.cpp.
-grep -v '\[host-daz\]' "$out/native.full.txt" > "$out/native.txt" || true
-grep -v '\[host-daz\]' "$out/wasm.full.txt" > "$out/wasm.txt" || true
+# [host-daz] digests are expected to differ, and [host-cast] ones only match an x86 host; see
+# the header of isa_differential_tests.cpp.
+skip='\[host-daz\]'
+$native_is_x86 || skip="$skip\\|\[host-cast\]"
+grep -v "$skip" "$out/native.full.txt" > "$out/native.txt" || true
+grep -v "$skip" "$out/wasm.full.txt" > "$out/wasm.txt" || true
 if diff -u "$out/native.txt" "$out/wasm.txt"; then
     echo "isa-differential: native and wasm digests are identical ($out)"
 else

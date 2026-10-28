@@ -57,28 +57,25 @@ MMIO *writes* are already checked inline (`FlatWriteNeedsPolicy`).
 **Web blocker.** wasm32 linear memory tops out at 4 GiB, *including* the runtime, and has no
 page protection and no fault handlers. An out-of-bounds access is a fatal trap.
 
-**What exists.** A checked mode already exists for AArch64 hosts with pages larger than 4 KiB:
-`GuestFlat::RequiresCheckedAccess()` routes `FlatRead*`/`FlatWrite*` to `Memory::Read*`/`Write*`,
-which walk the 1 MiB page table (`memory_access.h`: `g_fullPageBias`, `g_fullReadablePageBias`,
-`g_fullWritablePageBias`, the sparse executable sub-tables, and `g_deferredReadCoveredPages`).
-That model covers every interception case without traps. Two problems:
-- `Memory::Read32` and friends are out-of-line calls, which is too slow for every guest access.
-- `FlatWriteRam*` and the PSQ helpers (`isa/ppc_isa_quantized.h:269,286`) still write directly
-  through `MKW_FLAT_GUEST_BASE`.
+**What exists.** A checked mode already exists for hosts whose pages are larger than 4 KiB, and
+Apple Silicon builds ship with it: `GuestFlat::RequiresCheckedAccess()` routes `FlatRead*` and
+`FlatWrite*` to `Memory::Read*`/`Write*`. Those are inline lookups in the 1 MiB page bias tables
+(`memory_access.h`: `g_fullReadablePageBias`, `g_fullWritablePageBias`, the sparse executable
+sub-tables, `g_deferredReadCoveredPages`), so a plain RAM access costs one table load, and every
+interception case is handled without traps. `guest_flat_memory_macos.cpp` already implements
+`GuestFlat` with no fault handling at all.
 
-**Plan.**
-- Add a `__wasm__` configuration where `RequiresCheckedAccess()` is a `constexpr true` and the
-  `Flat*` helpers inline the bias-table fast path: load `g_fullReadablePageBias[addr >> 20]`
-  (or the writable table), add it, then load or store. Fall back to the existing slow path when
-  the entry is zero. The bias tables are 4096 entries of 32-bit `uintptr_t` (16 KiB each), and
-  the encoded `(host − guest) + 1` arithmetic wraps correctly modulo 2^32.
-- Point `FlatWriteRam*` and the PSQ direct paths at `g_fullPageBias` instead of a flat base.
-- New `guest_flat_memory_web.cpp`: no reservation, ordinary allocations for MEM1, MEM2, and the
-  locked cache, and `HostPointer()` backed by the page table.
-- **Parity gap to fix first:** on flat hosts, an unmapped guest touch silently commits a block and
-  carries on (counted in `FaultCounters::unmapped`), but the checked path throws
-  `Memory::AccessViolation("no mapped region")` (`runtime/src/memory.cpp:421`). The web build
-  needs the flat behaviour, or the two hosts diverge on wild pointers.
+**Plan (done, see Progress).**
+- `__wasm__` defines no flat base, makes `RequiresCheckedAccess()` a compile-time `true`, and
+  sends `FlatWriteRam*` through the checked path. The PSQ helpers already fall back when checked.
+  The bias arithmetic wraps correctly modulo 2^32 with a 32-bit `uintptr_t`.
+- `guest_flat_memory_web.cpp`: no reservation, plain zeroed allocations per region.
+- An unmapped guest touch throws `Memory::AccessViolation` in checked mode, where flat x86 hosts
+  commit the block and carry on. Apple Silicon builds already behave this way, so it is not a
+  web-specific problem, but it is a cross-host difference worth knowing about.
+- First optimization to try: `ResolveRangeHost` returns null in checked mode, which sends every
+  range-lowered access through the out-of-line `*ResolvedFallback` helpers. Resolving a range that
+  lies inside one plain 1 MiB page through the bias tables would keep those inline.
 - Possible later optimization: a masked "physical arena" (`arena + (addr & 0x1FFFFFFF)` covers
   the MEM1/MEM2 cached and uncached mirrors). It saves a table load but needs special handling for
   the locked cache and MMIO reads. Only worth it if profiling says so.
@@ -100,16 +97,21 @@ translated call stacks (`OSSleepThread`, `OSYieldThread`, and so on).
 | One pthread per guest thread, with a baton | **Baseline.** Each guest thread is a real pthread (a Web Worker) that sleeps on its own semaphore. The scheduler hands one baton around, so exactly one runs at a time, which keeps cooperative semantics exact. Works anywhere SharedArrayBuffer does. |
 | Wasm stack switching proposal | Not shipped. Revisit when it is. |
 
-**Plan.** Add `host_context_web.cpp` built on the baton model, and prespawn the pthread pool
-(`PTHREAD_POOL_SIZE`), because creating a worker needs the browser main thread to return to its
-event loop.
-- **Risk: thread-local state.** There are 59 `thread_local` uses across 20 runtime files (for
-  example `g_currentCpuContext` in `guest_abi/cpu_context.h` and the NI/FTZ mirrors in
-  `isa/ppc_isa_fpenv.h`). Today, every fiber shares one host thread's TLS. With one pthread per
-  guest thread, each gets its own copy. Every one of these must be classified as either
-  per-host-thread or per-guest-thread before this works.
-- **Risk: switch cost.** Each handoff is a futex wake. Measure switches per frame with the
-  existing perf stats before committing; JSPI is the fallback if this is too slow.
+**Plan (code done, see Progress).** The baton backend lives in `host_context.cpp` behind
+`MKW_HOST_CONTEXT_THREADS`, so it can be tested natively. The web build still has to prespawn the
+pthread pool (`PTHREAD_POOL_SIZE`), because creating a worker needs the browser main thread to
+return to its event loop.
+- **Thread-local state.** Every fiber used to share one host thread's TLS. Of the `thread_local`
+  variables in the runtime, most are caches, log de-duplication or worker-thread flags, which are
+  fine per thread. The guest-scoped ones (the fiber `CpuContext` handoff, the alarm and NAND
+  recursion guards, the audio poll cursor, the GX begin/timing flags) now use
+  `MKW_GUEST_DOMAIN_LOCAL`. The host FP mode that mirrors FPSCR[NI] is per thread, so a new guest
+  thread applies its own on entry.
+- **Destroyed contexts.** Native backends free a parked context's stack without unwinding it. A
+  thread cannot do that, so a guest thread destroyed after it has run stays parked forever (one
+  idle worker each). How often MKW destroys threads at runtime still needs measuring.
+- **Switch cost.** See Progress. Measure switches per frame with the existing perf stats in the
+  browser; JSPI is the fallback if this is too slow.
 
 ### 3. Host threads and the browser event loop — M
 
@@ -217,6 +219,11 @@ I found no assumption that pointers are 64-bit.
   quickly with their baseline compiler, then optimize in the background. Track `.wasm` size from
   the first full build. Running `wasm-opt` over a module this large may be too slow; per-shard
   `-O2` without LTO is the likely default.
+- **Float-to-int casts.** NaN and out-of-range casts are undefined in C++, so the runtime gets
+  whatever the host does: `INT_MIN` on x86. Wasm's saturating conversions (on by default in newer
+  LLVM, so in current Emscripten) give `0`/`INT_MAX` instead. Web builds must compile with
+  `-mno-nontrapping-fptoint`; `runtime/CMakeLists.txt` sets it for `MKW_PLATFORM_WEB`, and the
+  ISA differential's `cast_to_int` digest fails if it is lost.
 - **Build graph.** `emit-build-shards` and `runtime/CMakeLists.txt` hard-code x86 `-march`
   profiles, and Windows uses `__regcall` (`ppc_isa_config.h`). The web build needs an Emscripten
   toolchain file and per-target flags.
@@ -321,9 +328,9 @@ Each phase ends with something testable and adds a CI job, so it doesn't regress
 | Phase | Work | Exit criterion |
 | --- | --- | --- |
 | 0. Decide and spike | Pick a distribution model. Spikes: (a) baton-fiber switch cost in a browser, (b) aurora example running on `emdawnwebgpu` in a worker with `OffscreenCanvas`, (c) relaxed-SIMD FMA fusion probe across the target browsers and CPUs. | Written go/no-go for each spike. |
-| 1. Toolchain and ISA | Emscripten toolchain file, `__wasm__` branches in the ISA headers, `ax_mix_kernels.h`, and `gx_worker.cpp`. Build `runtime/tests` (`ppc_pair_fma_tests`, `psq_helpers_tests`, `runtime_config_tests`, `nand_*`, `test_expr`) for Node. | ISA tests pass under Node with results bit-identical to native. CI job added. |
-| 2. Memory model | Wasm checked fast path, `guest_flat_memory_web.cpp`, fix the unmapped-access parity gap, move `FlatWriteRam*` and PSQ off the flat base. | Synthetic-DOL recompilation test (`Launcher/Test-Recompilation.ps1` equivalent) runs headless (`--headless`) under Node. |
-| 3. Guest threads | `host_context_web.cpp` (baton), `thread_local` classification, pthread pool. | `host_context_tests` plus a multi-thread synthetic DOL pass under Node, with switch-cost numbers recorded. |
+| 1. Toolchain and ISA | **ISA part done.** Remaining: Emscripten toolchain file; build `runtime/tests` (`ppc_pair_fma_tests`, `psq_helpers_tests`, `runtime_config_tests`, `nand_*`, `test_expr`) for Node. (`ax_mix_kernels.h`, `gx_worker.cpp` and `host_cpu_baseline.cpp` already fall back to portable code off x86.) | ISA tests pass under Node with results bit-identical to native (**met** for the ISA differential). CI job added (**done**). |
+| 2. Memory model | **Code done.** Remaining: build it with Emscripten, `ResolveRangeHost` fast path. | Synthetic-DOL recompilation test (`Launcher/Test-Recompilation.ps1` equivalent) runs headless (`--headless`) under Node. |
+| 3. Guest threads | **Code done, tested natively.** Remaining: pthread pool sizing, browser switch-cost numbers. | `host_context_tests` plus a multi-thread synthetic DOL pass under Node, with switch-cost numbers recorded. |
 | 4. aurora on the web | `emdawnwebgpu`, GPU-thread funnel, async pipelines, callback-based waits, readbacks, SDL3 Emscripten window, input, and audio. | aurora examples, then the synthetic DOL, render in Chromium. |
 | 5. Boot the game | OPFS storage, disc import, `Config.toml` and NAND persistence, log download, fatal overlay. Retro Rewind static profile built and imported (`RetroRewind6` folder into OPFS) alongside the base game. | Local builds of PAL `RMCP01` and Retro Rewind both reach the title screen in Chromium. |
 | 6. Parity and performance | Ghost-replay sync check against native for both profiles, audio, input, F10 overlay, profiling (memory path, NI flushing, byte swaps, readback latency). | Ghost replays stay in sync for both profiles. Full speed on the README's minimum hardware in Chromium. |
@@ -353,7 +360,7 @@ Each phase ends with something testable and adds a CI job, so it doesn't regress
   `ppc_isa_float.h` and `ppc_isa_quantized.h`. `runtime/tests/isa_differential_tests.cpp` hashes
   every paired-single/FP/PSQ helper over 200k edge-biased inputs with FPSCR[NI] clear and set;
   `runtime/web/isa-differential.sh` builds it natively and for wasm32-wasi (run under Node) and
-  diffs the digests. All 53 compared digests are identical. CI job: `web_isa` in `build.yml`.
+  diffs the digests. All 55 compared digests are identical. CI job: `web_isa` in `build.yml`.
   - FPSCR[NI] on wasm: the pair primitives flush inputs (DAZ) and flush results with x86's
     after-rounding tininess rule, which matches native bit for bit. Helpers built from scalar C++
     (`ps_sum*`, `ps_sel`, `ps_res`, `ps_from_scalar`, the fused-single scalars, `fres`,
@@ -377,15 +384,6 @@ Each phase ends with something testable and adds a CI job, so it doesn't regress
   about 0.4 µs for a scheduler ping-pong and 0.5 µs with two workers, but 14–19 µs once there
   are more runnable contexts than cores. libco: about 20 ns. Browser numbers are still needed.
 
-### Corrections to the audit above
-
-- `Memory::Read*`/`Write*` are already inline bias-table lookups (end of
-  `guest_abi/memory_access.h`), so checked mode costs one table load per access, not a call.
-  Only `ResolveRangeHost` returns null in checked mode, which sends range-lowered accesses
-  through the out-of-line `*ResolvedFallback` helpers: the first memory-path optimization to try.
-- The "unmapped access" difference between flat and checked hosts already exists on shipped
-  Apple Silicon builds, so it is not a web-specific blocker.
-
 ### Found along the way
 
 - musl's `fma` (wasi-libc and Emscripten) returns `a*c + b` when `b` is zero, so a nonzero
@@ -393,6 +391,8 @@ Each phase ends with something testable and adds a CI job, so it doesn't regress
 - Native x86-64-v2 builds (no FMA) flip the sign of a NaN subtractor in `ps_msub`/`ps_nmsub`
   (`ffc00001` where v3 gives `7fc00001`): the scalar fallback negates the subtractor before
   `std::fma`. Pre-existing and unrelated to the web port; not fixed here.
+- Wasm's saturating float-to-int conversions would change out-of-range casts from x86's
+  `INT_MIN` (see section 6); pinned off with `-mno-nontrapping-fptoint`.
 - With two NaN operands, native x86 itself is not deterministic for commutative ops: clang may
   swap `mulps`/`addps` operands, so which payload wins depends on inlining.
 
