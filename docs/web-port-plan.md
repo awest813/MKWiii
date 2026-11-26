@@ -1,7 +1,8 @@
 # Web port: audit and plan
 
-Status: plan accepted; decisions recorded under [Decisions](#decisions). Progress is tracked under
-[Progress](#progress).
+The implementation decisions are recorded under [Decisions](#decisions). See
+the [browser status report](web-status.md) for the latest gameplay evidence and
+release gates.
 
 This document audits what stands between the current native runtime and a build that runs in a
 browser (WebAssembly + WebGPU), and lays out a phased plan. File references are to this repo and

@@ -162,6 +162,16 @@ Wheel Wizard drives this too.
 
 ## Building from source
 
+### Experimental browser port
+
+The WebAssembly and WebGPU port is experimental. Local development builds have
+completed the 50cc Mushroom Cup and same-screen races with two, three, and four
+players. Native-speed gameplay is still unverified. The ISO launcher and its
+static packaging tools are under development. See the [browser status report](docs/web-status.md)
+and the [web port plan](docs/web-port-plan.md).
+
+### Native builds
+
 Owning the game is still required even if you compile everything yourself.
 
 You'll need: .NET 8 SDK, CMake, Ninja, and LLVM/Clang (the shipped build uses LLVM-MinGW targeting
