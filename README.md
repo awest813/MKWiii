@@ -166,9 +166,10 @@ Wheel Wizard drives this too.
 
 The WebAssembly and WebGPU port is experimental. Local development builds have
 completed the 50cc Mushroom Cup and same-screen races with two, three, and four
-players. Native-speed gameplay is still unverified. The ISO launcher and its
-static packaging tools are under development. See the [browser status report](docs/web-status.md)
-and the [web port plan](docs/web-port-plan.md).
+players. The experimental static launcher reads a supported PAL ISO selected
+from the player's device. Native speed, continuous audio, and public hosting
+are still open. See the [browser status report](docs/web-status.md) and the
+[web port plan](docs/web-port-plan.md).
 
 ### Native builds
 

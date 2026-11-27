@@ -447,14 +447,13 @@ Each phase ends with something testable and adds a CI job, so it doesn't regress
 - With two NaN operands, native x86 itself is not deterministic for commutative ops: clang may
   swap `mulps`/`addps` operands, so which payload wins depends on inlining.
 
-### Next
+### Current validation
 
-- A real game build: translate the user's PAL disc with the web toolchain (Phase 5 Setup flow),
-  then size the module and measure startup and frame time.
-- Disc import and saves on OPFS (section 8), audio through Web Audio (section 9), gamepad and
-  keyboard input (section 10).
-- A presenting canvas in a real GPU browser; headless Chromium here only proves the render path.
-- Browser switch-cost numbers for the JSPI backend.
+Local browser builds have booted real game data from a selected PAL ISO, verified
+save restoration after restart, and finished races with one to four local players.
+The game builds used hardware WebGPU in headless Chrome. See the
+[browser status report](web-status.md) for measured speed and audio, the current
+static-hosting requirements, and the remaining release checks.
 
 ## Decisions
 
