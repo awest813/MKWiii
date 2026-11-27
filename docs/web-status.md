@@ -1,6 +1,6 @@
 # Browser port status
 
-Updated November 26, 2026. The browser port is experimental. The results below
+Updated November 27, 2026. The browser port is experimental. The results below
 come from local development builds tested in headless Chrome with hardware
 WebGPU and virtual controllers. The `main` branch contains the synthetic browser
 test harness. The game launcher and static packaging tools are still in development.
@@ -11,7 +11,7 @@ test harness. The game launcher and static packaging tools are still in developm
 | --- | --- |
 | Single-player | All four races of the 50cc Mushroom Cup finished through the game menus. The gold trophy, B rank, and save data survived a browser restart. |
 | Same-screen multiplayer | Two-, three-, and four-player tests produced physical race finishes and passed Save & Exit. These tests covered Luigi Circuit with virtual controllers. |
-| Four-player audio | A diagnostic build using an AudioWorklet and a longer mixer catch-up window played two minutes of active racing audio with zero missing or dropped frames. All four racers finished, and Save & Exit passed. Earlier diagnostic runs recorded audio gaps. |
+| Split-screen audio | A diagnostic build using an AudioWorklet and a longer mixer catch-up window played two minutes of active racing audio with zero missing or dropped frames in separate two-, three-, and four-player races. Every local racer finished, and Save & Exit passed. The same runs recorded roughly 2.1–3.5 seconds of missing audio output around menus and course loading. |
 | Local ISO launcher | A PAL RMCP01 revision 0 ISO loaded from the browser's file picker. The tests recorded zero disc uploads and verified startup retry, fullscreen focus restoration, and save recovery after intentional WebGPU device loss. |
 
 ## Performance work
@@ -19,9 +19,20 @@ test harness. The game launcher and static packaging tools are still in developm
 In the measured headless race, the retained static build ran at about 45% of
 native pace. A renderer experiment skipped about 23% of texture-binding calls
 over the sampled portion of a race. The staff replay matched its reference
-finish time and Save & Exit passed. A separate pipeline-cache experiment
-compiled to WebAssembly, but its game link failed on unresolved audio symbols,
-so there is no game-speed measurement for that change.
+finish time and Save & Exit passed. A version that skips the calls inside Wasm
+ran at 46.07% of native pace, about 2.89% faster than the mean of two matched
+controls in one headless race sequence. It also matched the reference finish
+of 1:40.349 in a full CPU-driven race. A separate pipeline-cache experiment ran
+at 44.25% of native pace in headless Chrome. The two matched controls measured
+43.48% and 43.75%. The candidate ran about 1.46% faster than the mean control
+time over guest frames 600–3000. The result covers one diagnostic race sequence.
+
+With both renderer changes enabled, the candidate ran at 48.94% of native pace.
+The two controls ran at 45.16% and 49.15%, so the combined result fell within
+the observed control range. A separate staging-buffer change passed four
+hardware WebGPU fixture cases covering immediate release, timer fallback,
+release after mapping, and map cancellation. Each case returned its slot to the
+pool and left no pending waiter. Full-game timing for this change is pending.
 
 ## Static hosting requirements
 
@@ -36,17 +47,17 @@ Cross-Origin-Embedder-Policy: require-corp
 ```
 
 Evaluate `window.crossOriginIsolated` in the launcher page's browser console
-and confirm it returns `true` before testing disc selection. Saves are tied to the site origin,
-so changing hostnames gives the launcher a separate save store. The current
-static package is a local development build generated from a supplied disc.
+and confirm it returns `true` before testing disc selection. Use a static host
+that lets you configure both response headers. Saves are tied to the site
+origin, so changing hostnames gives the launcher a separate save store. The
+current static package is a local development build generated from a supplied disc.
 
 ## Release gates
 
 - Verify native game speed in a focused browser for single-player and each
   split-screen mode. A reproducible game-speed gain remains unverified.
-- Verify audio during startup, track transitions, and complete sessions across
-  all player counts. The four-player AudioWorklet result covers one sample in
-  one diagnostic race.
+- Fix the observed audio gaps around menus and course loading, then verify
+  startup, track transitions, and complete sessions across all player counts.
 - Expand testing to physical controllers, more cups and courses, and recovery
   from an actual graphics-driver reset.
 - Publish the launcher source and packaging tools. A public release also needs

@@ -177,6 +177,11 @@ Owning the game is still required even if you compile everything yourself.
 You'll need: .NET 8 SDK, CMake, Ninja, and LLVM/Clang (the shipped build uses LLVM-MinGW targeting
 `x86-64-v3`).
 
+On Windows, the compiler also needs C++/WinRT headers for media detection. Setup
+supplies these through its dependency package. For a direct CMake build, pass
+`-DMKW_CPPWINRT_INCLUDE_DIR=<directory containing winrt/base.h>` using the prepared
+`cppwinrt` dependency or the `cppwinrt` directory in your Windows SDK.
+
 Build the translator:
 
 ```powershell
