@@ -17,11 +17,16 @@ packaging tools. See the [browser status report](web-status.md).
    can reuse the selected ISO in the same tab. Select it again after reloading
    the page. Browser saves are tied to the site origin.
 
+If a replacement ISO fails verification, the launcher keeps the previous
+verified ISO available for the current tab.
+
 ## Serve a prepared package
 
 Serve the complete package over HTTPS from one origin. Keep `index.html`,
 the worker, manifests, game files, and content-hashed Wasm chunks at their
-packaged relative paths. Serve JavaScript files with a JavaScript MIME type.
+packaged relative paths. A static file server is sufficient. Players select
+their ISO locally, so the host needs no extraction service or file upload
+endpoint. Serve JavaScript files with a JavaScript MIME type.
 Keep launcher and manifest responses revalidatable, and cache content-hashed
 Wasm chunks as immutable. Use normal missing-file responses for absent
 resources so script and Wasm requests do not resolve to the launcher HTML.
@@ -35,8 +40,9 @@ Cross-Origin-Embedder-Policy: require-corp
 
 Use a host that supports custom response headers. If the package includes a
 `_headers` file, keep it alongside `index.html` and confirm that the host
-applies its rules. For deployment under a path prefix, check that both the
-isolation and cache rules cover that path.
+applies its rules. Upload-only hosts that omit the isolation headers cannot run
+this build. For deployment under a path prefix, check that both the isolation
+and cache rules cover that path.
 
 ## Check the deployed launcher
 

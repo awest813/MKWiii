@@ -167,11 +167,12 @@ Wheel Wizard drives this too.
 The WebAssembly and WebGPU port is experimental. Local development builds have
 completed the 50cc Mushroom Cup and same-screen races with two, three, and four
 players. The experimental static launcher reads a PAL RMCP01 revision 0 ISO
-selected or dropped on the page. The browser reads the disc locally. One
-optimized build reached 58.43% of native pace in a headless single-player test.
-A separate three-player build played through the race without audio underruns,
-with gaps still present in the menus and course loading. Public hosting still
-needs verification. [Browser status](docs/web-status.md) ·
+selected or dropped on the page. The browser reads the disc locally. The latest
+optimized build passed race and save checks for all four player counts and
+reached 58.01% of native pace in a headless single-player test. Three- and
+four-player runs had continuous active race audio. Startup underruns and a
+two-player audio gap remain. Public hosting still needs verification.
+[Browser status](docs/web-status.md) ·
 [Static hosting](docs/web-static-hosting.md) · [Web port plan](docs/web-port-plan.md)
 
 ### Native builds

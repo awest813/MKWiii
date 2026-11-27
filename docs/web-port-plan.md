@@ -452,10 +452,10 @@ Each phase ends with something testable and adds a CI job, so it doesn't regress
 Local browser builds have booted real game data from a selected PAL ISO, verified
 save restoration after restart, and finished races with one to four local players.
 The game builds used hardware WebGPU in headless Chrome. The latest optimized
-static package passed local HTTP header and integrity checks. That build matched
-the single-player reference finish and saved after two-, three-, and four-player
-races. An optional AudioWorklet build passed the three-player active race audio
-check. Menu and course-loading underruns remain. The
+static package passed local HTTP header and integrity checks. The same optimized
+AudioWorklet runtime matched the single-player reference finish and saved after
+two-, three-, and four-player races. Full active race audio passed with three
+and four players. A two-player race gap and startup underruns remain. The
 [browser status report](web-status.md) tracks measured speed, audio, and release
 checks. The [static hosting guide](web-static-hosting.md) covers deployment of a
 prepared package and isolating the launcher origin.
