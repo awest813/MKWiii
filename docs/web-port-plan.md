@@ -2,7 +2,8 @@
 
 The implementation decisions are recorded under [Decisions](#decisions). See
 the [browser status report](web-status.md) for the latest gameplay evidence and
-release gates.
+release gates. The report also lists the [static hosting requirements](web-status.md#static-hosting-requirements)
+for testing a locally generated browser build.
 
 This document audits what stands between the current native runtime and a build that runs in a
 browser (WebAssembly + WebGPU), and lays out a phased plan. File references are to this repo and
