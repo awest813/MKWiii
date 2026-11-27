@@ -166,10 +166,11 @@ Wheel Wizard drives this too.
 
 The WebAssembly and WebGPU port is experimental. Local development builds have
 completed the 50cc Mushroom Cup and same-screen races with two, three, and four
-players. The experimental static launcher reads a supported PAL ISO selected
-from the player's device. Native speed, continuous audio, and public hosting
-are still open. See the [browser status report](docs/web-status.md) and the
-[web port plan](docs/web-port-plan.md).
+players. The experimental static launcher reads a PAL RMCP01 revision 0 ISO
+selected on the player's device. The latest locally packaged build reached
+58.43% of native pace in a headless single-player test. Audio gaps remain, and
+public hosting still needs verification. See the
+[browser status report](docs/web-status.md) and the [web port plan](docs/web-port-plan.md).
 
 ### Native builds
 

@@ -451,9 +451,12 @@ Each phase ends with something testable and adds a CI job, so it doesn't regress
 
 Local browser builds have booted real game data from a selected PAL ISO, verified
 save restoration after restart, and finished races with one to four local players.
-The game builds used hardware WebGPU in headless Chrome. See the
-[browser status report](web-status.md) for measured speed and audio, the current
-static-hosting requirements, and the remaining release checks.
+The game builds used hardware WebGPU in headless Chrome. The latest optimized
+static package passed local HTTP header and integrity checks. That build matched
+the single-player reference finish and saved after two- and three-player races.
+See the [browser status report](web-status.md) for the current test matrix,
+measured speed and audio, static hosting requirements, and remaining release
+checks.
 
 ## Decisions
 

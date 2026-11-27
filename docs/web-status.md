@@ -14,6 +14,20 @@ test harness. The game launcher and static packaging tools are still in developm
 | Split-screen audio | Earlier AudioWorklet checks had gap-free active racing in separate two-, three-, and four-player races. Later renderer candidates had gaps in full-session recordings. Menu and course-loading gaps persist. |
 | Local ISO launcher | A PAL RMCP01 revision 0 ISO loaded from the browser's file picker. Tests recorded zero disc uploads and verified startup retry with the same ISO, fullscreen focus restoration, disc reads after a worker restart, and save recovery after intentional WebGPU device loss. |
 
+### Latest optimized static build
+
+| Check | Local headless Chrome result |
+| --- | --- |
+| Single-player | The CPU-driven Luigi Circuit reference matched the 1:40.349 finish and all lap splits. The game saved. Pace was 58.43% of native over guest frames 600–3000. |
+| Two players | Both racers physically finished and Save & Exit passed. A 30.04-second sample contained zero all-zero SDL audio buffers. |
+| Three players | All three racers physically finished and Save & Exit passed. A 30.08-second sample contained four all-zero SDL audio buffers, totaling about 171 ms. |
+| Four players | Verification of this build was in progress at the time of writing. The earlier finish and save result above came from a separate local build. |
+| Launcher recovery | The hardware WebGPU device-loss check passed, including save restoration, fullscreen, controller input, and disc access after the worker restarted. The check recorded zero disc uploads. |
+
+The audio samples measure buffers produced by SDL during the race. Full-race
+audio continuity and device playback remain open checks. The single-player
+pace measurement comes from one headless run.
+
 ## Performance work
 
 In the measured headless race, the retained static build ran at about 45% of
@@ -75,10 +89,13 @@ and confirm it returns `true` before testing disc selection. Use a static host
 that lets you configure both response headers. Saves are tied to the site
 origin, so changing hostnames gives the launcher a separate save store. The
 current static package is a local development build generated from a supplied disc.
-It passed local launcher checks with 15 content-hashed Wasm chunks. Serve the
+The optimized package passed inventory and integrity checks for all 52 files,
+including 15 content-hashed chunks that reconstruct the 121,121,636-byte Wasm
+module. A local HTTP preview verified 16 representative responses, including
+the root launcher, game frame, worker, manifests, and a Wasm chunk. Serve the
 complete package from one origin, preserve JavaScript and WebAssembly MIME types,
 revalidate the launcher and manifests, and use immutable caching for the hashed
-chunks. Public hosting is still unverified.
+chunks. Public HTTPS hosting remains unverified.
 
 ## Release gates
 
