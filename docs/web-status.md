@@ -11,8 +11,8 @@ test harness. The game launcher and static packaging tools are still in developm
 | --- | --- |
 | Single-player | All four races of the 50cc Mushroom Cup finished through the game menus. The gold trophy, B rank, and save data survived a browser restart. |
 | Same-screen multiplayer | Two-, three-, and four-player tests produced physical race finishes and passed Save & Exit. These tests covered Luigi Circuit with virtual controllers. |
-| Split-screen audio | Earlier AudioWorklet checks had gap-free active racing in separate two-, three-, and four-player races. Later renderer candidates had gaps in full-session recordings. Menu and course-loading gaps persist. |
-| Local ISO launcher | A PAL RMCP01 revision 0 ISO loaded from the browser's file picker. Tests recorded zero disc uploads and verified startup retry with the same ISO, fullscreen focus restoration, disc reads after a worker restart, and save recovery after intentional WebGPU device loss. |
+| Split-screen audio | An optimized three-player AudioWorklet build delivered 254.25 seconds of active race audio with zero missing, dropped, or fully silent PCM frames. Menu and course-loading underruns totaled 1.67 seconds. |
+| Local ISO launcher | A PAL RMCP01 revision 0 ISO loaded from the browser's file picker. A separate automated browser fixture verified drag and drop across the launcher page. Real-disc tests recorded zero disc uploads and verified startup retry with the same ISO, fullscreen focus restoration, disc reads after a worker restart, and save recovery after intentional WebGPU device loss. |
 
 ### Latest optimized static build
 
@@ -21,12 +21,16 @@ test harness. The game launcher and static packaging tools are still in developm
 | Single-player | The CPU-driven Luigi Circuit reference matched the 1:40.349 finish and all lap splits. The game saved. Pace was 58.43% of native over guest frames 600–3000. |
 | Two players | Both racers physically finished and Save & Exit passed. A 30.04-second sample contained zero all-zero SDL audio buffers. |
 | Three players | All three racers physically finished and Save & Exit passed. A 30.08-second sample contained four all-zero SDL audio buffers, totaling about 171 ms. |
-| Four players | Verification of this build was in progress at the time of writing. The earlier finish and save result above came from a separate local build. |
+| Four players | All four racers physically finished and Save & Exit passed. A 30.12-second sample contained eight all-zero SDL audio buffers, totaling about 341 ms. |
 | Launcher recovery | The hardware WebGPU device-loss check passed, including save restoration, fullscreen, controller input, and disc access after the worker restarted. The check recorded zero disc uploads. |
 
-The audio samples measure buffers produced by SDL during the race. Full-race
-audio continuity and device playback remain open checks. The single-player
-pace measurement comes from one headless run.
+The table's audio samples measure buffers produced by SDL during the race. A
+separate run with the optional AudioWorklet backend reached physical finishes
+for all three racers and passed Save & Exit. Of its 1.67 seconds of pre-race
+underruns, 1.11 seconds occurred in menus and 0.56 seconds during course
+loading. The result measures the worklet PCM stream in headless Chrome.
+Continuous audio across entire sessions and physical playback remain open.
+The single-player pace measurement comes from one headless run.
 
 ## Performance work
 
@@ -70,7 +74,8 @@ A hardware WebGPU fixture combined the used staging ranges into one upload per
 frame. It reduced writes from 178 to 41 without adding payload bytes. All
 98,304 bytes read back from the GPU matched the original buffer and texture
 data. The prototype preserves the staging offsets used by already-encoded
-commands. Its effect on race speed and full-session audio remains unmeasured.
+commands. A separate packed-upload build also passed physical finishes and saves
+with four players. Native-speed acceptance remains open.
 
 ## Static hosting requirements
 
@@ -95,7 +100,15 @@ module. A local HTTP preview verified 16 representative responses, including
 the root launcher, game frame, worker, manifests, and a Wasm chunk. Serve the
 complete package from one origin, preserve JavaScript and WebAssembly MIME types,
 revalidate the launcher and manifests, and use immutable caching for the hashed
-chunks. Public HTTPS hosting remains unverified.
+chunks. Public HTTPS hosting remains unverified. The
+[static hosting guide](web-static-hosting.md) covers deployment and isolation
+checks for a prepared package.
+
+An uncached loader change starts compilation as individually verified Wasm
+chunks arrive in order when CacheStorage is unavailable. The full runtime
+checksum still gates instantiation, and the loader can fall back to verified
+bytes. All 79 Node-based web tests passed in the local development checkout.
+Browser startup timing for the change remains unmeasured.
 
 ## Release gates
 
